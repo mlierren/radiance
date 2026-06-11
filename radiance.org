@@ -127,17 +127,23 @@ curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/workspace/bin I
 export PATH=/workspace/bin:$PATH
 export UV_PYTHON_INSTALL_DIR=/workspace/uv/python UV_CACHE_DIR=/workspace/uv/cache
 export CUDA_HOME=/usr/local/cuda PATH=$CUDA_HOME/bin:$PATH
+# 빌드 대상 GPU만 컴파일(A100 sm_80 + 3090/A6000 sm_86) — 전 아키텍처 빌드 방지(수십분→수분)
+export TORCH_CUDA_ARCH_LIST="8.0;8.6"
 
 # venv 생성(볼륨, managed python). 재실행 시 존재하면 재사용.
 uv python install 3.10
 uv venv --python 3.10 --python-preference only-managed /workspace/envs/r3dg
 VPY=/workspace/envs/r3dg/bin/python
-uv pip install --python $VPY setuptools wheel ninja
+# setuptools<80 핀: torch 1.12 의 cpp_extension 이 pkg_resources 를 import (setuptools>=81 에서 제거됨)
+uv pip install --python $VPY "setuptools==69.5.1" wheel ninja
+# numpy<2: torch 1.12.1 은 numpy 1.x ABI 로 빌드됨 (numpy 2.x 는 런타임 오류)
+uv pip install --python $VPY "numpy<2"
 
-# 핀 스택(Ampere sm_86 호환 PyTorch 1.12.1+cu116)
+# 핀 스택(Ampere sm_80/86 호환 PyTorch 1.12.1+cu116)
 uv pip install --python $VPY torch==1.12.1+cu116 torchvision==0.13.1+cu116 torchaudio==0.12.1+cu116 \
     --index-url https://download.pytorch.org/whl/cu116
-uv pip install --python $VPY torch_scatter==2.1.1 -f https://data.pyg.org/whl/torch-1.12.1+cu116.html
+# torch_scatter: 소스 빌드가 torch 를 보도록 --no-build-isolation
+uv pip install --python $VPY --no-build-isolation torch_scatter==2.1.1 -f https://data.pyg.org/whl/torch-1.12.1+cu116.html
 uv pip install --python $VPY kornia==0.6.12
 
 # CUDA 확장(설치된 torch를 보도록 --no-build-isolation)

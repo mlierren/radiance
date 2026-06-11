@@ -370,6 +370,10 @@ export UV_PYTHON_INSTALL_DIR="{UV_HOME}/python"
 export UV_CACHE_DIR="{UV_HOME}/cache"
 export CUDA_HOME=/usr/local/cuda
 export PATH="$CUDA_HOME/bin:/workspace/bin:$PATH"
+# Pin build targets to OUR GPUs (A100 sm_80, 3090/A6000/A5000/A4500 sm_86).
+# Without this, torch_scatter + the CUDA submodules compile for EVERY arch torch
+# supports (sm_35..sm_86) — minutes vs tens of minutes per extension.
+export TORCH_CUDA_ARCH_LIST="8.0;8.6"
 
 if [ ! -x /workspace/bin/uv ]; then
     echo "[ENV] Installing uv to /workspace/bin (persists on volume)..."
@@ -391,6 +395,11 @@ else
     # CUDA submodules import pkg_resources, which setuptools>=81 removed — newer
     # setuptools breaks every extension build with "No module named pkg_resources".
     "$UV" pip install --python "$VPY" "setuptools==69.5.1" wheel ninja || echo "[ENV] build-deps issue"
+
+    # Pin numpy<2 FIRST: torch 1.12.1 was built against the numpy 1.x C-ABI, so
+    # numpy 2.x triggers "compiled against NumPy 1.x cannot be run in NumPy 2.x"
+    # at runtime. Installing it before torch keeps uv from pulling numpy 2.x.
+    "$UV" pip install --python "$VPY" "numpy<2" || echo "[ENV] numpy pin issue"
 
     # Pinned stack (radiance.org §1.2). Ampere-compatible PyTorch 1.12.1+cu116.
     "$UV" pip install --python "$VPY" \\
