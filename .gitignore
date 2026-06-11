@@ -20,7 +20,9 @@ data/
 outputs/
 envs/
 checkpoints/
-third_party/          # external repos cloned on the Pod (Relightable3DGaussian, etc.)
+# external repos (Relightable3DGaussian, gaussian-grouping, nvdiffrast) —
+# cloned on the Pod AND locally for reference; non-commercial license, never committed
+third_party/
 
 # --- 3DGS / training outputs ---
 *.ply
