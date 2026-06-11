@@ -113,10 +113,24 @@ ssh -L 8888:localhost:8888 root@<public_ip> -p <ssh_port>
 ```
 이제 org-babel `jupyter-python` 블록(`:kernel r3dg`)이 원격 커널에서 실행됩니다.
 
+> ⚠️ private key(`~/.ssh/id_ed25519`)에 passphrase가 있으면 **먼저 agent에 올리세요**:
+> `ssh-add ~/.ssh/id_ed25519` (passphrase 1회). 안 그러면 키는 맞아도 비대화형 접속이 거부됩니다.
+
+### 3-1. `~/.ssh/config` 자동 기록 — `ssh radiance-pod` 한 줄로
+Pod의 public IP/포트는 **stop/start 마다 바뀝니다.** launcher가 현재 엔드포인트를
+`~/.ssh/config`의 관리 블록(`Host radiance-pod`)에 써줍니다(터널 8888 포함). `--create`/`--start`
+시 자동 실행되며, 수동 갱신도 가능:
+```bash
+uv run scripts/runpod_launcher.py --write-ssh-config   # 현재 IP/포트로 ~/.ssh/config 갱신
+ssh radiance-pod                                        # 접속 + 8888 터널 자동
+```
+(전용 `~/.ssh/known_hosts.radiance` 사용 → IP 교체로 인한 host-key 충돌 방지.)
+
 ### 4. 기타
 ```bash
 uv run scripts/runpod_launcher.py --list             # 내 Pod 목록
-uv run scripts/runpod_launcher.py --stop             # Pod 정지(볼륨 유지)
+uv run scripts/runpod_launcher.py --stop             # Pod 정지(볼륨 유지, GPU 반납)
+uv run scripts/runpod_launcher.py --start            # 정지된 Pod 재개 + ~/.ssh/config 갱신
 uv run scripts/runpod_launcher.py --delete           # Pod 종료(볼륨 유지)
 uv run scripts/runpod_launcher.py --delete-volume <vol_id>   # 볼륨 삭제(주의: 영구)
 ```
@@ -126,9 +140,18 @@ Pod 이름 기본값은 `radiance-<username>`. `--name`으로 변경 가능.
 
 ## 재시작 후 이어가기
 
-Pod를 정지/삭제했다가 **같은 Network Volume으로** 다시 `--create` 하면, venv·CUDA 확장·repo·
-data가 그대로 남아 있어 launcher가 느린 단계를 건너뜁니다. 로컬 Claude Code/Emacs는 그대로이니
-SSH 터널만 다시 연결하면 됩니다. (자세한 RESUME 절차는 `radiance.org` §6)
+- **`--stop` 했던 경우**: `--start`로 재개. (`--create`는 "이미 존재"로 거부됨)
+- **`--delete` 했던 경우**: **같은 Network Volume**으로 `--create --volume-id <id>`. venv·CUDA
+  확장·repo·data가 볼륨에 남아 있어 빌드 단계를 건너뜁니다.
+
+둘 다:
+- public IP/포트가 **새로 배정**되므로 `--start`/`--create`가 `~/.ssh/config`를 자동 갱신합니다
+  (수동: `--write-ssh-config`). 이후 `ssh radiance-pod`.
+- jupyter는 부팅 후 **~3\~6분 뒤 자동 재기동**(apt 재설치 + 커널 등록). `ssh radiance-pod
+  'tail -f /workspace/startup.log'`로 `[JL] Starting JupyterLab` 확인.
+- ⚠️ GPU 재고가 'Low'면 **재개 실패 가능**(stop은 GPU 반납). 짧은 휴식은 켜둔 채 두는 게 안전.
+
+(자세한 RESUME 절차는 `radiance.org` §6)
 
 ---
 

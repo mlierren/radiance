@@ -127,6 +127,13 @@ THIRD_PARTY_REPOS = [
 JUPYTER_TOKEN = "radiance_token"
 JUPYTER_PORT = 8888
 
+# `ssh <alias>` after --create/--start/--write-ssh-config (managed block in
+# ~/.ssh/config). The pod's public IP+port change on every stop/start, so we
+# rewrite the block each time. A dedicated known_hosts avoids host-key churn.
+DEFAULT_SSH_ALIAS = "radiance-pod"
+SSH_KNOWN_HOSTS = "~/.ssh/known_hosts.radiance"
+SSH_CONFIG_PATH = "~/.ssh/config"
+
 # RunPod datacenters with available storage clusters (as of 2026-05).
 # RunPod returns the authoritative list in error messages if this drifts.
 DATACENTERS = {
@@ -608,6 +615,7 @@ def create_pod(
             if p and p.get("desiredStatus") == "RUNNING" and (p.get("runtime") or {}).get("ports"):
                 print("\nPod is RUNNING!")
                 show_pod_status(api_key, pod["id"], pod_name=target_pod_name)
+                write_ssh_config(api_key, pod_name=target_pod_name)
                 return
             time.sleep(5)
             print(".", end="", flush=True)
@@ -646,6 +654,26 @@ def delete_pod(api_key: str, pod_name: Optional[str] = None):
         print(f"Failed: {e}")
 
 
+def _parse_runtime_endpoints(pod_id, runtime):
+    """Return (ssh_ip, ssh_port, jupyter_url) from a pod's runtime.
+
+    For exposed-TCP pods the public IP lives on the port object (port["ip"] +
+    isIpPublic), NOT on runtime["publicIp"] (which is often null).
+    """
+    ssh_ip = ssh_port = jupyter_url = None
+    for port in (runtime or {}).get("ports", []) or []:
+        priv = port.get("privatePort")
+        if priv == JUPYTER_PORT:
+            if port.get("isIpPublic"):
+                jupyter_url = f"http://{port['ip']}:{port['publicPort']}"
+            else:
+                jupyter_url = f"https://{pod_id}-{JUPYTER_PORT}.proxy.runpod.net"
+        elif priv == 22 and port.get("type") == "tcp" and port.get("isIpPublic"):
+            ssh_ip = port["ip"]
+            ssh_port = port["publicPort"]
+    return ssh_ip, ssh_port, jupyter_url
+
+
 def show_pod_status(api_key: str, pod_id: Optional[str] = None, pod_name: Optional[str] = None):
     runpod.api_key = api_key
     if not pod_id:
@@ -666,24 +694,7 @@ def show_pod_status(api_key: str, pod_id: Optional[str] = None, pod_name: Option
 
     runtime = pod.get("runtime")
     if runtime:
-        ports = runtime.get("ports", [])
-        proxy_base = f"https://{pod_id}"
-        jupyter_url = None
-        ssh_ip = None
-        ssh_port = None
-        for port in ports:
-            priv = port["privatePort"]
-            # For exposed-TCP pods the public IP lives on the port object
-            # (port["ip"] + isIpPublic), NOT on runtime["publicIp"] (often null).
-            if priv == JUPYTER_PORT:
-                if port.get("isIpPublic"):
-                    jupyter_url = f"http://{port['ip']}:{port['publicPort']}"
-                else:
-                    jupyter_url = f"{proxy_base}-{JUPYTER_PORT}.proxy.runpod.net"
-            elif priv == 22 and port.get("type") == "tcp" and port.get("isIpPublic"):
-                ssh_ip = port["ip"]
-                ssh_port = port["publicPort"]
-
+        ssh_ip, ssh_port, jupyter_url = _parse_runtime_endpoints(pod_id, runtime)
         print("\nAccess:")
         if ssh_ip and ssh_port:
             print(f"  SSH:           ssh root@{ssh_ip} -p {ssh_port}")
@@ -692,6 +703,7 @@ def show_pod_status(api_key: str, pod_id: Optional[str] = None, pod_name: Option
                   f"root@{ssh_ip} -p {ssh_port}")
             print(f"    2) Connect:  http://localhost:{JUPYTER_PORT}/lab?token={JUPYTER_TOKEN}")
             print(f"                 (emacs-jupyter -> kernel 'r3dg')")
+            print(f"  Tip: `--write-ssh-config` writes this as `ssh {DEFAULT_SSH_ALIAS}` (+tunnel).")
         else:
             print("  SSH:           (no public TCP port yet — use the proxy URL below)")
         if jupyter_url:
@@ -702,6 +714,104 @@ def show_pod_status(api_key: str, pod_id: Optional[str] = None, pod_name: Option
         print("\nRuntime not ready yet.")
         print(f"  Potential Jupyter: https://{pod_id}-{JUPYTER_PORT}.proxy.runpod.net"
               f"/lab?token={JUPYTER_TOKEN}")
+
+
+def write_ssh_config(api_key: str, pod_name: Optional[str] = None,
+                     alias: str = DEFAULT_SSH_ALIAS, quiet: bool = False) -> bool:
+    """Write/replace a managed `Host <alias>` block in ~/.ssh/config pointing at
+    the pod's current SSH endpoint (which changes on every stop/start).
+    Returns True on success."""
+    import re
+    import subprocess
+    runpod.api_key = api_key
+    target = get_pod_name(pod_name)
+    pod = find_pod_by_name(target, api_key)
+    if not pod:
+        print(f"Pod '{target}' not found.")
+        return False
+    pod = runpod.get_pod(pod["id"])
+    ssh_ip, ssh_port, _ = _parse_runtime_endpoints(pod["id"], pod.get("runtime"))
+    if not (ssh_ip and ssh_port):
+        print("No public TCP SSH endpoint yet (pod still starting?). "
+              "Re-run --write-ssh-config once --status shows an SSH line.")
+        return False
+
+    begin = f"# >>> radiance-launcher {alias} (managed; do not edit) >>>"
+    end = f"# <<< radiance-launcher {alias} <<<"
+    block = "\n".join([
+        begin,
+        f"Host {alias}",
+        f"    HostName {ssh_ip}",
+        f"    Port {ssh_port}",
+        "    User root",
+        f"    LocalForward {JUPYTER_PORT} localhost:{JUPYTER_PORT}",
+        "    IdentityFile ~/.ssh/id_ed25519",
+        "    StrictHostKeyChecking accept-new",
+        f"    UserKnownHostsFile {SSH_KNOWN_HOSTS}",
+        end,
+    ])
+
+    path = os.path.expanduser(SSH_CONFIG_PATH)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    existing = ""
+    if os.path.isfile(path):
+        with open(path, "r", encoding="utf-8") as f:
+            existing = f.read()
+    pat = re.compile(re.escape(begin) + r".*?" + re.escape(end), re.S)
+    if pat.search(existing):
+        new = pat.sub(block, existing)
+    else:
+        prefix = existing.rstrip("\n")
+        new = (prefix + "\n\n" if prefix else "") + block + "\n"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(new)
+    os.chmod(path, 0o600)
+
+    # Drop any stale host key for this exact target so a reused ip:port with a
+    # fresh host key doesn't trip "REMOTE HOST IDENTIFICATION HAS CHANGED".
+    kh = os.path.expanduser(SSH_KNOWN_HOSTS)
+    try:
+        subprocess.run(["ssh-keygen", "-R", f"[{ssh_ip}]:{ssh_port}", "-f", kh],
+                       capture_output=True, check=False)
+    except Exception:
+        pass
+
+    if not quiet:
+        print(f"~/.ssh/config updated -> `ssh {alias}`  (root@{ssh_ip}:{ssh_port}, "
+              f"auto-tunnels {JUPYTER_PORT}). emacs-jupyter: http://localhost:{JUPYTER_PORT}"
+              f"/lab?token={JUPYTER_TOKEN} (kernel r3dg)")
+    return True
+
+
+def start_pod(api_key: str, pod_name: Optional[str] = None,
+              alias: str = DEFAULT_SSH_ALIAS):
+    """Resume a stopped pod, wait for RUNNING, then refresh the SSH config block
+    (the public IP/port are reassigned on resume)."""
+    runpod.api_key = api_key
+    target = get_pod_name(pod_name)
+    pod = find_pod_by_name(target, api_key)
+    if not pod:
+        print(f"Pod '{target}' not found.")
+        return
+    print(f"Resuming {pod['id']} ({target})...")
+    try:
+        runpod.resume_pod(pod["id"], gpu_count=1)
+    except Exception as e:
+        print(f"Failed to resume (GPU may be unavailable in the DC right now): {e}")
+        return
+    print("Waiting for RUNNING state...")
+    for _ in range(60):
+        p = runpod.get_pod(pod["id"])
+        if p and p.get("desiredStatus") == "RUNNING" and (p.get("runtime") or {}).get("ports"):
+            print("\nPod is RUNNING!")
+            show_pod_status(api_key, pod["id"], pod_name=target)
+            write_ssh_config(api_key, pod_name=target, alias=alias)
+            print("\nNote: jupyter re-launches a few min after boot (apt + kernel "
+                  "register). Watch `ssh " + alias + " 'tail -f /workspace/startup.log'`.")
+            return
+        time.sleep(5)
+        print(".", end="", flush=True)
+    print("\nResumed but slow to start. Re-run --status / --write-ssh-config shortly.")
 
 
 def list_pods(api_key: str):
@@ -738,10 +848,18 @@ Quick start:
     # Pod actions
     parser.add_argument("--test-api", action="store_true")
     parser.add_argument("--create", action="store_true")
+    parser.add_argument("--start", action="store_true",
+                        help="Resume a stopped pod and refresh ~/.ssh/config "
+                             "(public IP/port are reassigned on resume).")
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--stop", action="store_true")
     parser.add_argument("--delete", action="store_true")
+    parser.add_argument("--write-ssh-config", action="store_true",
+                        help=f"Write/replace a managed `Host {DEFAULT_SSH_ALIAS}` block in "
+                             f"~/.ssh/config with the pod's current SSH endpoint + tunnel.")
+    parser.add_argument("--ssh-alias", type=str, default=DEFAULT_SSH_ALIAS,
+                        help=f"Host alias for --write-ssh-config/--start (default: {DEFAULT_SSH_ALIAS})")
 
     # Pod config
     parser.add_argument("--gpu", type=str, default=DEFAULT_GPU_TYPE,
@@ -803,10 +921,14 @@ Quick start:
             skip_bootstrap=args.skip_bootstrap,
             cloud_type=args.cloud_type,
         )
+    elif args.start:
+        start_pod(api_key, args.name, alias=args.ssh_alias)
     elif args.list:
         list_pods(api_key)
     elif args.status:
         show_pod_status(api_key, pod_name=args.name)
+    elif args.write_ssh_config:
+        write_ssh_config(api_key, pod_name=args.name, alias=args.ssh_alias)
     elif args.stop:
         stop_pod(api_key, args.name)
     elif args.delete:
