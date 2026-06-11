@@ -387,15 +387,18 @@ else
         || echo "[ENV] venv create issue"
     VPY="{ENV_PREFIX}/bin/python"
 
-    # Build backend deps (extensions use torch's cpp_extension at build time).
-    "$UV" pip install --python "$VPY" setuptools wheel ninja || echo "[ENV] build-deps issue"
+    # Build backend deps. PIN setuptools<80: torch 1.12's cpp_extension and the
+    # CUDA submodules import pkg_resources, which setuptools>=81 removed — newer
+    # setuptools breaks every extension build with "No module named pkg_resources".
+    "$UV" pip install --python "$VPY" "setuptools==69.5.1" wheel ninja || echo "[ENV] build-deps issue"
 
     # Pinned stack (radiance.org §1.2). Ampere-compatible PyTorch 1.12.1+cu116.
     "$UV" pip install --python "$VPY" \\
         torch==1.12.1+cu116 torchvision==0.13.1+cu116 torchaudio==0.12.1+cu116 \\
         --index-url https://download.pytorch.org/whl/cu116 || echo "[ENV] torch install issue"
-    # torch_scatter matched to torch-1.12.1+cu116; kornia per repo.
-    "$UV" pip install --python "$VPY" torch_scatter==2.1.1 \\
+    # torch_scatter matched to torch-1.12.1+cu116. --no-build-isolation so the
+    # sdist build (when no matching wheel) can see the torch we just installed.
+    "$UV" pip install --python "$VPY" --no-build-isolation torch_scatter==2.1.1 \\
         -f https://data.pyg.org/whl/torch-1.12.1+cu116.html || echo "[ENV] torch_scatter issue"
     "$UV" pip install --python "$VPY" kornia==0.6.12 || echo "[ENV] kornia issue"
 
@@ -518,7 +521,7 @@ def create_pod(
     container_disk_gb: Optional[int] = None,
     pod_volume_gb: Optional[int] = None,
     skip_bootstrap: bool = False,
-    cloud_type: str = "ALL",
+    cloud_type: str = "SECURE",
 ):
     runpod.api_key = api_key
     target_pod_name = get_pod_name(pod_name)
@@ -655,28 +658,33 @@ def show_pod_status(api_key: str, pod_id: Optional[str] = None, pod_name: Option
     runtime = pod.get("runtime")
     if runtime:
         ports = runtime.get("ports", [])
-        public_ip = runtime.get("publicIp")
         proxy_base = f"https://{pod_id}"
         jupyter_url = None
+        ssh_ip = None
         ssh_port = None
         for port in ports:
             priv = port["privatePort"]
+            # For exposed-TCP pods the public IP lives on the port object
+            # (port["ip"] + isIpPublic), NOT on runtime["publicIp"] (often null).
             if priv == JUPYTER_PORT:
                 if port.get("isIpPublic"):
-                    jupyter_url = f"http://{public_ip}:{port['publicPort']}"
+                    jupyter_url = f"http://{port['ip']}:{port['publicPort']}"
                 else:
                     jupyter_url = f"{proxy_base}-{JUPYTER_PORT}.proxy.runpod.net"
-            elif priv == 22:
+            elif priv == 22 and port.get("type") == "tcp" and port.get("isIpPublic"):
+                ssh_ip = port["ip"]
                 ssh_port = port["publicPort"]
 
         print("\nAccess:")
-        if ssh_port and public_ip:
-            print(f"  SSH:           ssh root@{public_ip} -p {ssh_port}")
+        if ssh_ip and ssh_port:
+            print(f"  SSH:           ssh root@{ssh_ip} -p {ssh_port}")
             print("\n  emacs-jupyter workflow (radiance.org §1.4):")
             print(f"    1) Tunnel:   ssh -L {JUPYTER_PORT}:localhost:{JUPYTER_PORT} "
-                  f"root@{public_ip} -p {ssh_port}")
+                  f"root@{ssh_ip} -p {ssh_port}")
             print(f"    2) Connect:  http://localhost:{JUPYTER_PORT}/lab?token={JUPYTER_TOKEN}")
             print(f"                 (emacs-jupyter -> kernel 'r3dg')")
+        else:
+            print("  SSH:           (no public TCP port yet — use the proxy URL below)")
         if jupyter_url:
             print(f"\n  Jupyter (proxy): {jupyter_url}/lab?token={JUPYTER_TOKEN}")
         print("\n  Bootstrap log:  ssh in, then `tail -f /workspace/startup.log`")
@@ -737,9 +745,12 @@ Quick start:
     parser.add_argument("--skip-bootstrap", action="store_true",
                         help="Don't build the uv venv at boot (do it manually per "
                              "the README / radiance.org §1.2-1.4). Repos are still cloned.")
-    parser.add_argument("--cloud-type", type=str, default="ALL",
+    parser.add_argument("--cloud-type", type=str, default="SECURE",
                         choices=["ALL", "SECURE", "COMMUNITY"],
-                        help="Cloud type filter (default: ALL)")
+                        help="Cloud type filter (default: SECURE). The emacs-jupyter "
+                             "SSH tunnel needs a real public IP that routes to the "
+                             "container sshd — COMMUNITY exposed-TCP often does NOT, "
+                             "so SSH fails there. Use ALL only if you don't need SSH.")
 
     # Identity & secrets
     parser.add_argument("--api-key", type=str)

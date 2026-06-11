@@ -172,9 +172,16 @@ $VPY -m ipykernel install --user --name r3dg --display-name "r3dg"
 #+end_src
 #+begin_src bash
 # [로컬] SSH 터널 후 emacs-jupyter가 원격 r3dg 커널에 연결
+# <pod-ssh-target> 예: "root@216.81.151.3 -p 13140" (launcher --status 가 출력)
 ssh -L 8888:localhost:8888 <pod-ssh-target>
 #+end_src
 이 시점부터 Claude Code(로컬)가 ~darren-org-*~ 로 이 커널을 구동한다.
+#+begin_quote
+IMPORTANT (SSH): **SECURE cloud 필수.** COMMUNITY cloud 의 exposed-TCP 포트는 컨테이너
+sshd 로 라우팅되지 않아 `ssh -L` 터널이 실패한다(호스트 sshd 가 응답·거부). launcher 는
+기본 ~--cloud-type SECURE~. proxy URL(`*.proxy.runpod.net`)은 emacs-jupyter 에 부적합.
+SECURE 는 3090 재고가 적을 수 있어 A100(sm_80)/A4500(sm_86) 등 Ampere 호환으로 대체 가능.
+#+end_quote
 
 * 2. Stage 1 — Relightable 3DGS base (GATE) [/]
 :PROPERTIES:
