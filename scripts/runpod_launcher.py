@@ -338,9 +338,21 @@ def _build_startup_script(
 if [ -d "{WORKSPACE_REPO_DIR}/.git" ]; then
     echo "[REPO] {WORKSPACE_REPO_DIR} present; pulling..."
     git -C "{WORKSPACE_REPO_DIR}" pull --ff-only || echo "[REPO] pull skipped"
+elif [ -d "{WORKSPACE_REPO_DIR}" ] && [ -n "$(ls -A "{WORKSPACE_REPO_DIR}" 2>/dev/null)" ]; then
+    # dir exists & non-empty but not a git repo (e.g. only third_party/): adopt it
+    # in place so the cloned src/ lands beside the already-built env/third_party.
+    echo "[REPO] Adopting existing {WORKSPACE_REPO_DIR} as a git repo..."
+    cd "{WORKSPACE_REPO_DIR}"
+    git init -q
+    git remote add origin {repo_url_lit} 2>/dev/null || git remote set-url origin {repo_url_lit}
+    git fetch -q origin && git remote set-head origin -a 2>/dev/null
+    DEF=$(git symbolic-ref -q --short refs/remotes/origin/HEAD | sed 's@^origin/@@')
+    DEF=${{DEF:-main}}
+    git reset -q --hard "origin/$DEF" && git checkout -q -B "$DEF" "origin/$DEF" \\
+        || echo "[REPO] adopt failed (check repo is public / URL)"
 else
     echo "[REPO] Cloning canonical repo..."
-    git clone {repo_url_lit} "{WORKSPACE_REPO_DIR}" || echo "[REPO] clone failed (check URL/SSH key)"
+    git clone {repo_url_lit} "{WORKSPACE_REPO_DIR}" || echo "[REPO] clone failed (check URL is public)"
 fi
 """
     else:
@@ -523,6 +535,38 @@ echo "[OK] Radiance bootstrap done at $(date)"
 
 
 # ============================================================================
+# Repo URL resolution (local repo -> cloned on the pod, radiance.org §1.0)
+# ============================================================================
+
+def _normalize_github_https(url: str) -> str:
+    """Convert an SSH GitHub remote to its HTTPS form so the pod can clone a
+    PUBLIC repo without credentials (and `git pull` later, also no auth)."""
+    url = url.strip()
+    if url.startswith("git@github.com:"):
+        url = "https://github.com/" + url[len("git@github.com:"):]
+    elif url.startswith("ssh://git@github.com/"):
+        url = "https://github.com/" + url[len("ssh://git@github.com/"):]
+    return url
+
+
+def resolve_repo_url(explicit: Optional[str] = None) -> Optional[str]:
+    """Pick the repo to clone on the pod: explicit --repo-url, then
+    RADIANCE_REPO_URL, then the local `git remote get-url origin` (auto).
+    Always normalized to HTTPS for credential-free public clone/pull."""
+    import subprocess
+    candidate = explicit or os.environ.get("RADIANCE_REPO_URL")
+    if not candidate:
+        try:
+            candidate = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                capture_output=True, text=True, check=False,
+            ).stdout.strip() or None
+        except Exception:
+            candidate = None
+    return _normalize_github_https(candidate) if candidate else None
+
+
+# ============================================================================
 # Pod Management
 # ============================================================================
 
@@ -560,10 +604,17 @@ def create_pod(
     print(f"Creating pod '{target_pod_name}' with GPU {gpu_type}...")
     print(f"  Image: {IMAGE_NAME_GPU}")
 
+    resolved_repo = resolve_repo_url(repo_url)
+    if resolved_repo:
+        print(f"  Repo (cloned to {WORKSPACE_REPO_DIR}): {resolved_repo}")
+    else:
+        print("  Repo: none detected (set --repo-url / RADIANCE_REPO_URL, or add a git "
+              "remote). Pod gets an empty /workspace/radiance.")
+
     startup = _build_startup_script(
         no_jupyter=no_jupyter,
         run_command=run_command,
-        repo_url=repo_url or os.environ.get("RADIANCE_REPO_URL"),
+        repo_url=resolved_repo,
         bootstrap_env=not skip_bootstrap,
     )
     startup_b64 = base64.b64encode(startup.encode("utf-8")).decode("utf-8")

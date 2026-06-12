@@ -81,18 +81,23 @@ uv run scripts/runpod_launcher.py --list-volumes      # volume id 확인
 ```bash
 uv run scripts/runpod_launcher.py --create \
     --gpu "NVIDIA GeForce RTX 3090" \
-    --volume-id <vol_id> \
-    --repo-url git@github.com:you/radiance.git   # 생략 시 RADIANCE_REPO_URL 사용
+    --volume-id <vol_id>
 ```
+**repo 클론 URL은 자동 감지**됩니다 — 우선순위: `--repo-url` > `RADIANCE_REPO_URL` >
+로컬 `git remote get-url origin`. SSH 형식(`git@github.com:...`)이어도 pod 클론용으로는
+**HTTPS로 자동 변환**(공개 repo는 인증 없이 clone/pull). 즉 이 repo에 GitHub remote만
+걸어두면 이후 `--create` 시 알아서 `/workspace/radiance`로 클론됩니다.
+
 부팅 시 자동으로 수행되는 작업 (`radiance.org` §1.1~1.4 미러링):
 1. apt 시스템 의존성 + `sshd` 기동 (+ SSH 공개키 주입)
-2. 외부 repo 클론 → `/workspace/radiance/third_party/`
+2. **canonical repo 클론/pull** → `/workspace/radiance` (위 자동 감지 URL)
+3. 외부 repo 클론 → `/workspace/radiance/third_party/`
    (Relightable3DGaussian, gaussian-grouping, nvdiffrast)
-3. **uv venv 빌드** `/workspace/envs/r3dg` — uv-managed Python(볼륨)+ PyTorch 1.12.1+cu116
+4. **uv venv 빌드** `/workspace/envs/r3dg` — uv-managed Python(볼륨)+ PyTorch 1.12.1+cu116
    + `torch_scatter`/`kornia` + CUDA 확장 컴파일(simple-knn, bvh, r3dg-rasterization, nvdiffrast)
    + colmap/ffmpeg(apt)
-4. **`r3dg` 커널 등록** (emacs-jupyter `:kernel r3dg` 대상)
-5. **JupyterLab** `:8888` 기동
+5. **`r3dg` 커널 등록** (emacs-jupyter `:kernel r3dg` 대상)
+6. **JupyterLab** `:8888` 기동
 
 > 첫 부팅은 venv 빌드+CUDA 컴파일로 **15~30분** 소요됩니다. 같은 볼륨으로 재생성 시엔
 > 컴파일 결과가 보존되어 빠르게 재개됩니다. 진행 상황: Pod에 SSH로 들어가
