@@ -1,0 +1,7 @@
+#+TITLE: Stage 1 REBUILD — 올바른 pose/intrinsics부터 (COLMAP) → 건강한 3DGS
+#+PROPERTY: header-args:jupyter-python :session /jpy:localhost#8888:radiance :kernel r3dg
+
+# 왜 재시작: 1차 시도는 합성 turntable pose(fov=40·elev=15·radius=3, 전부 추측)로 학습 →
+#   가우시안 축비 median 2487:1(슬리버), 가시 형상 10:1(사람 ~4:1) = 수직 왜곡. relight/edit 무의미.
+# 교훈: PSNR만 믿지 말 것. 형상(가우시안 축비·실루엣 비율)을 직접 검증할 것.
+# 이번 원칙: 추측 금지. COLMAP으로 실제 intrinsics(fov) + extrinsics 복원 후, 형상 건강성 GATE 통과해야 학습 진행.

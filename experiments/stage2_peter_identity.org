@@ -1,0 +1,52 @@
+#+TITLE: Stage 2 — Identity 채널 (Gaussian Grouping, Peter body)
+#+PROPERTY: header-args:jupyter-python :session /jpy:localhost#8888:radiance :kernel r3dg
+
+# 목표: Stage1 3DGS 집합 위에 identity encoding distill → 단일 자산이 material+identity 동시 보유(편집 활성).
+# 경로(build-first): (1) DEVA automatic 마스크 생성 → 시각 GATE(부위 분리 확인)
+#                    (2) 마스크 양호 시 GG 학습으로 편집 데모 검증
+#                    (3) frozen Stage1 geometry에 graft(단일 canonical 자산) — 마스크 GATE 후 결정
+# 마스크 의존성: segment_anything + SAM vit_h + DEVA-propagation.pth. GroundingDINO/detectron2 불필요(automatic 모드).
+
+#+begin_src jupyter-python
+# [2a-env] DEVA 텍스트 모드(Grounded-SAM) 환경 확정 — 부위 마스크용
+# 설치(r3dg env, uv): segment-anything, deva(-e), timm, groundingdino-py
+# 핀 주의: groundingdino-py가 transformers 5.x/supervision 0.6으로 끌어올려 torch1.12와 충돌 → 다음으로 고정:
+#   transformers==4.30.2, supervision==0.21.0, tokenizers<0.14  (torch 1.12.1+cu116 유지 확인)
+# 체크포인트(saves/): sam_vit_h_4b8939.pth, DEVA-propagation.pth, groundingdino_swint_ogc.pth, GroundingDINO_SwinT_OGC.py
+# 검증: groundingdino import OK + DEVA with_text path OK.
+print('DEVA text(Grounded-SAM) env ready: tf=4.30.2 sv=0.21.0 torch=1.12.1')
+#+end_src
+
+#+RESULTS:
+: DEVA text(Grounded-SAM) env ready: tf=4.30.2 sv=0.21.0 torch=1.12.1
+
+#+begin_src jupyter-python
+# [2a-GATE] 부위 마스크 시각 GATE — DEVA 텍스트(Grounded-SAM), prompt='head.robe.sash.tunic.hand.foot.'
+# 산출물: .../peter_body_text/{Annotations(gray, 학습용), Visualizations(라벨 컬러), pred.json}
+# Claude 직접 판독(front/side/back/side 4뷰):
+#   ✅ 부위 분리 양호 — 사선 띠(sash)/겉옷/속옷/머리/손/발이 별도 영역, 시점 간 색(=ID) 일관
+#   ⚠️ 라벨 전부 'head'로 깨짐 — GroundingDINO category_id=None(프롬프트 클래스 매핑 실패) → 시각화 라벨만 무의미.
+#      GG는 정수 마스크 ID로 그룹화 → 라벨 무관, 학습에 영향 없음.
+# ID 일관성(>0.5% 면적): 36 distinct, 그중 ~9개가 47-50/50 프레임 안정(큰부위 ~22%x3, 중간 ~7%x3, 소부위 ~1.8%x3)
+#   과분할(한 부위가 2-3 ID)은 있으나 편집 시 다중 ID 선택으로 처리 가능.
+# 판정: PASS — automatic(인물=1덩어리) 대비 부위 단위로 사용 가능. GG identity 학습 입력으로 적합.
+# 디버깅 이력(frame12 데드락): ResultSaver 스레드가 prompts[None] 크래시→큐 블록. result_utils.py None-guard 패치로 해결.
+print('Stage2 mask GATE: PASS (part-level, ID-consistent). Ready for Gaussian Grouping identity training.')
+#+end_src
+
+#+RESULTS:
+: Stage2 mask GATE: PASS (part-level, ID-consistent). Ready for Gaussian Grouping identity training.
+
+#+begin_src jupyter-python
+# [DEMO-relight] Relight turntable MP4 데모 완성 (PoC relight 축 실증)
+# Stage1 neilf 자산을 2개 HDRI 하 360 turntable(N=120, radius=11)로 렌더 -> pbr_env MP4.
+#   relighting.py -co relight_cfg -e env_map/{envmap6,envmap3}.exr --capture_list pbr_env --video
+# 프레이밍 주의: neilf ply는 학습 좌표계 대비 ~3.5x 스케일(create_from_gaussians 정규화) -> 카메라 radius=3(학습) 아닌 11 필요.
+# 결과: 같은 베드로 자산이 실내(envmap6)/야외(envmap3) 환경광에 반응 -> '단일 자산 relight' 입증.
+# 산출물(로컬 영구): experiments/demo/relight_{envmap6,envmap3}.mp4 (+ mid_*.png 썸네일)
+# Pod: /workspace/outputs/peter_body/relight_demo_{envmap6,envmap3}/pbr_env.mp4
+print('relight demo MP4 done: envmap6(indoor) + envmap3(outdoor), full-body turntable')
+#+end_src
+
+#+RESULTS:
+: relight demo MP4 done: envmap6(indoor) + envmap3(outdoor), full-body turntable

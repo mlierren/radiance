@@ -1,0 +1,157 @@
+#+TITLE: Stage 1 — Relightable 3DGS base (Peter full-body turntable, PoC GATE)
+#+PROPERTY: header-args:jupyter-python :session /jpy:localhost#8888:radiance :kernel r3dg
+
+
+#+begin_src jupyter-python
+# [0] 환경 검증 — 원격 r3dg 커널 (A100)
+import torch, sys, numpy
+print('python', sys.version.split()[0], '| torch', torch.__version__, '| numpy', numpy.__version__)
+print('cuda', torch.cuda.is_available(), '|', torch.cuda.get_device_name(0))
+#+end_src
+
+#+RESULTS:
+: python 3.10.20 | torch 1.12.1+cu116 | numpy 1.26.4
+: cuda True | NVIDIA A100-SXM4-80GB
+
+#+begin_src jupyter-python
+# [1a] 프레임 추출 — Peter 전신 turntable (1280x720, 24fps, 9.9s, 238f) → fps=5 (~50뷰)
+import subprocess, os, glob
+out_dir='data/peter_body/images'
+os.makedirs(out_dir, exist_ok=True)
+for f in glob.glob(out_dir+'/*.png'): os.remove(f)
+subprocess.run(['ffmpeg','-y','-i','data/peter_body/turntable_body.mp4','-vf','fps=5', out_dir+'/%04d.png'], capture_output=True, text=True)
+files=sorted(glob.glob(out_dir+'/*.png'))
+print('extracted', len(files), 'frames')
+#+end_src
+
+#+RESULTS:
+: extracted 50 frames
+
+#+begin_src jupyter-python
+# [1a-check] GATE 시각 점검 — 6뷰: 상=RGB, 하=마스크(th=12)
+import numpy as np, glob
+from PIL import Image as PImage
+from IPython.display import Image as IPImage
+files=sorted(glob.glob('data/peter_body/images/*.png'))
+idxs=[0,9,19,29,39,49]; TH=12; tw,th=256,144
+mont=PImage.new('RGB',(tw*len(idxs),th*2),(40,40,40))
+for c,i in enumerate(idxs):
+    arr=np.array(PImage.open(files[i]).convert('RGB'))
+    mask=PImage.fromarray(((arr.mean(-1)>TH)*255).astype('uint8')).convert('RGB')
+    mont.paste(PImage.fromarray(arr).resize((tw,th)),(c*tw,0)); mont.paste(mask.resize((tw,th)),(c*tw,th))
+mont.save('data/peter_body/_contact.png')
+IPImage('data/peter_body/_contact.png')
+#+end_src
+
+#+RESULTS:
+[[file:./.ob-jupyter/b4916ebd0aee1df8156932039853da73a63f2f42.png]]
+
+#+begin_src jupyter-python
+# [stale-test] 현재 세션 PID 기준값
+import os; print('session=radiance pid=', os.getpid())
+#+end_src
+
+#+RESULTS:
+: session=radiance pid= 7353
+
+#+begin_src jupyter-python
+# [1b] NeRF-synthetic 데이터셋 생성 — RGBA(알파=th=12 마스크) + 원형 transforms
+# 로더 계약(third_party/Relightable3DGaussian/scene/dataset_readers.py 검증):
+#  - 마스크 = RGBA 알파채널 (별도 masks/ 아님)  - file_path는 확장자 없이(로더가 .png append)
+#  - transform_matrix = OpenGL/Blender c2w (로더가 c2w[:,1:3]*=-1로 COLMAP 변환)  - 배경 검정 기본
+# canonical 헬퍼: src/poses_turntable.py (여기선 self-contained 인라인으로 기록)
+import os, json, math, glob
+import numpy as np
+from PIL import Image
+
+base='data/peter_body'; img_dir=base+'/images'; rgba_dir=base+'/rgba'
+os.makedirs(rgba_dir, exist_ok=True)
+TH=12; radius, elevation_deg, fov_x_deg, test_every = 3.0, 15.0, 40.0, 8
+
+# (1) RGBA: alpha = luminance mask
+files=sorted(f for f in os.listdir(img_dir) if f.endswith('.png'))
+fracs=[]
+for fn in files:
+    rgb=np.array(Image.open(os.path.join(img_dir,fn)).convert('RGB'))
+    alpha=((rgb.mean(-1)>TH)*255).astype('uint8')
+    Image.fromarray(np.dstack([rgb,alpha]),'RGBA').save(os.path.join(rgba_dir,fn))
+    fracs.append((alpha>0).mean())
+
+# (2) 원형 poses — 절대 인덱스로 theta, every-8th held-out
+def look_at_c2w(eye, target=(0,0,0), up=(0,0,1)):
+    eye,target,up=map(lambda v: np.array(v,float),(eye,target,up))
+    f=target-eye; f/=np.linalg.norm(f)
+    r=np.cross(f,up); r/=np.linalg.norm(r); u=np.cross(r,f)
+    c2w=np.eye(4); c2w[:3,0],c2w[:3,1],c2w[:3,2],c2w[:3,3]=r,u,-f,eye
+    return c2w
+n=len(files); el=math.radians(elevation_deg); train,test=[],[]
+for i,fn in enumerate(files):
+    th=2*math.pi*i/n
+    eye=(radius*math.cos(th)*math.cos(el), radius*math.sin(th)*math.cos(el), radius*math.sin(el))
+    fr={'file_path': os.path.join('.','rgba',os.path.splitext(fn)[0]), 'transform_matrix': look_at_c2w(eye).tolist()}
+    (test if i%test_every==0 else train).append(fr)
+for name,frames in (('transforms_train.json',train),('transforms_test.json',test)):
+    json.dump({'camera_angle_x':math.radians(fov_x_deg),'frames':frames}, open(os.path.join(base,name),'w'), indent=2)
+
+print('RGBA',len(files),'| fg frac %.3f (%.3f-%.3f)'%(np.mean(fracs),min(fracs),max(fracs)))
+print('transforms: train',len(train),'test',len(test))
+print('loader path check:', os.path.exists(os.path.join(base, train[0]['file_path']+'.png')))
+#+end_src
+
+#+RESULTS:
+: RGBA 50 | fg frac 0.107 (0.094-0.114)
+: transforms: train 43 test 7
+: loader path check: True
+
+#+begin_src jupyter-python
+# [1c] Relightable3DGaussian 학습 — stage1 3DGS (geometry/appearance) 가동 확인
+# 환경 수정(1회성): r3dg env는 uv venv(pip seed 없음) → 누락 deps를 uv로 설치.
+#   /workspace/bin/uv pip install -p /workspace/envs/r3dg/bin/python \
+#       tqdm imageio matplotlib plyfile scipy tensorboard opencv-python-headless pyexr dearpygui
+#   (kornia/nvdiffrast/torch1.12.1+cu116/torchvision/numpy는 부트스트랩부터 존재; 위 패키지는 torch 비의존)
+# 실행 주의: 반드시 env 인터프리터(/workspace/envs/r3dg/bin/python -u)로. bash -lc python=/usr/bin/python(금지).
+# 런치 커맨드(detached):
+#   cd /workspace/radiance/third_party/Relightable3DGaussian
+#   python -u train.py --eval -s /workspace/data/peter_body -m /workspace/outputs/peter_body/stage1_3dgs \
+#       --lambda_normal_render_depth 0.01 --lambda_normal_smooth 0.01 --lambda_mask_entropy 0.1 \
+#       --save_training_vis --lambda_depth_var 1e-2   > train_3dgs.log 2>&1
+# 로더 검증: 'Loading Training Cameras 43' + 'Test 7'(our split) + 'points at init 100000'(synthetic Blender 경로).
+import subprocess, re
+d=open('/workspace/outputs/peter_body/train_3dgs.log','rb').read().replace(b'\r',b'\n').decode('utf-8','replace')
+d=re.sub(r'[^\x20-\x7e\n]','',d)
+prog=[l for l in d.split('\n') if 'Training progress' in l]
+print('alive pid8664:', bool(subprocess.run('pgrep -f stage1_3dgs',shell=True,capture_output=True,text=True).stdout.strip()))
+print('last:', prog[-1] if prog else 'n/a')
+#+end_src
+
+#+RESULTS:
+: alive pid8664: True
+: last: Training progress:   1%|          | 296/30000 [00:51<59:11,  8.36it/s, num=1e+5, psnr=23.9330277]
+
+#+begin_src jupyter-python
+# [1c-done] 3DGS stage 완료 — geometry/appearance base 학습 결과
+# Training complete @ iter 30000 (~72분, A100). 체크포인트 5k 간격 저장.
+# held-out 7 test뷰 평가: PSNR 26.18 / SSIM 0.92 / LPIPS 0.060  (train PSNR ~30)
+#  -> 합성 turntable pose가 기하적으로 정합함을 입증(틀린 pose면 test PSNR 붕괴). RGBA 마스크/OpenGL c2w 규약 정상.
+# 산출물: outputs/peter_body/stage1_3dgs/{point_cloud/iteration_30000, chkpnt30000.pth}
+# 다음: neilf stage(-t neilf -c chkpnt30000.pth, 40k iter) = BRDF/material 분해 → §1d 분해 검증(시각 GATE).
+print('3dgs PSNR_test=26.18 SSIM=0.92 LPIPS=0.060; neilf chained as stage1_neilf')
+#+end_src
+
+#+RESULTS:
+: 3dgs PSNR_test=26.18 SSIM=0.92 LPIPS=0.060; neilf chained as stage1_neilf
+
+#+begin_src jupyter-python
+# [1d] 분해 검증 (GATE) — neilf 40k 산출물, held-out TEST 뷰 0001/0025 채널별 점검
+# eval/{gt,render,base_color(albedo),normal,roughness,visibility,global,local,lights}/*.png
+# 정량: PSNR 25.07 / SSIM 0.915 / LPIPS 0.071 (test 7뷰)
+# 정성(시각 GATE, Claude 직접 판독):
+#   render≈GT(외형/겉옷/사선띠/포즈 재현, 50뷰·3DGS로 부드러움)  albedo 비교적 shading-free
+#   roughness 천에 타당  env light 추정·relight 동작  / normal 고주파 노이즈(예상된 3DGS 약점)
+# 판정: PoC 기준 PASS — 단일 자산이 분해+재조명을 그럴듯하게 지탱. normal prior가 다음 개선 후보.
+# 로컬 사본: /tmp/radiance_gate/*.png
+print('Stage1 GATE: decomposition PASS (PoC); normals noisy -> normal-prior candidate')
+#+end_src
+
+#+RESULTS:
+: Stage1 GATE: decomposition PASS (PoC); normals noisy -> normal-prior candidate

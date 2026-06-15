@@ -438,6 +438,15 @@ else
     "$UV" pip install --python "$VPY" --no-build-isolation ./submodules/simple-knn || echo "[ENV] simple-knn build failed"
     "$UV" pip install --python "$VPY" --no-build-isolation ./bvh                   || echo "[ENV] bvh build failed"
     "$UV" pip install --python "$VPY" --no-build-isolation ./r3dg-rasterization    || echo "[ENV] r3dg-rasterization build failed"
+
+    # Runtime / dataset-prep / viz deps used by the FINAL pipeline (frame extract,
+    # masks, analytic poses, training, Z-rescale, turntable render) and the
+    # org-babel workflow. Pillow PINNED <10: torch 1.12's tensorboard uses
+    # Image.ANTIALIAS, removed in Pillow 10 (--save_training_vis crashes otherwise).
+    "$UV" pip install --python "$VPY" \\
+        "pillow==9.5.0" tqdm plyfile scipy opencv-python-headless imageio \\
+        matplotlib ipywidgets tensorboard pyexr dearpygui \\
+        || echo "[ENV] runtime deps issue"
 fi
 
 # COLMAP + ffmpeg are native apps (not pip): install via apt (radiance.org Stage 1).

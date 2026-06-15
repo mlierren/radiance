@@ -98,6 +98,9 @@ dmypy.json
 profile_default/
 ipython_config.py
 *.ipynb
+# org-babel (emacs-jupyter) inline image outputs
+.ob-jupyter/
+_contact.png
 
 # ==========================================================================
 # Emacs / org-mode
