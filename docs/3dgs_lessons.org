@@ -101,7 +101,7 @@
 | 얼굴(원본) | peter_face_neg30k_standard.ply | 세로 길쭉(미보정) |
 | 몸통(보정) | peter_body_v2_30k_zcorr_standard.ply | sign=-1, 238f, 30k, ZF=0.271 |
 | 몸통(원본) | peter_body_v2_30k_standard.ply | 세로 길쭉(미보정) |
-- 보조 스크립트: experiments/zrescale_ply.py (proper 이방성 Z-rescale).
+- 보조 스크립트: src/zrescale_ply.py (proper 이방성 Z-rescale).
 
 * 6. 다른 작업자(Hernan)의 요청 분석 + 우리와 비교
 ** Hernan의 요청 분석

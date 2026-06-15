@@ -74,6 +74,7 @@ def turntable_transforms(image_dir, out_dir, rel_subdir="rgba", radius=3.0,
         (test if (test_every and i % test_every == 0) else train).append(frame)
 
     cam_angle_x = math.radians(fov_x_deg)
+    os.makedirs(out_dir, exist_ok=True)
     for name, frames in (("transforms_train.json", train),
                          ("transforms_test.json", test)):
         with open(os.path.join(out_dir, name), "w") as fh:
@@ -98,3 +99,30 @@ def make_rgba_dataset(image_dir, out_subdir, th=12):
         Image.fromarray(rgba, "RGBA").save(os.path.join(out_subdir, fn))
         fracs.append((alpha > 0).mean())
     return len(files), float(np.mean(fracs))
+
+
+# NOTE: make_rgba_dataset above is the legacy luminance-only masker (black bg).
+# The current Step-3 masker is experiments/make_masks.py (black/gray/auto). Kept here
+# only for the original NeRF-synthetic path.
+
+
+if __name__ == "__main__":
+    # [Step 4] CLI: turntable analytic camera poses → transforms_train/test.json
+    #   python src/poses_turntable.py <rgba_dir> <out_dir> [--direction -1] [--elevation 0] ...
+    import argparse
+    ap = argparse.ArgumentParser(description="Turntable analytic poses → transforms_*.json")
+    ap.add_argument("image_dir", help="RGBA frames dir (예: data/peter_face/rgba)")
+    ap.add_argument("out_dir", help="transforms_*.json 출력 위치 (예: data/peter_face)")
+    ap.add_argument("--rel-subdir", default="rgba", help="json의 file_path 접두(이미지 폴더명)")
+    ap.add_argument("--radius", type=float, default=3.0)
+    ap.add_argument("--elevation", type=float, default=0.0)
+    ap.add_argument("--fov", type=float, default=40.0)
+    ap.add_argument("--test-every", type=int, default=8)
+    ap.add_argument("--direction", type=int, default=-1, choices=[-1, 1],
+                    help="★회전 방향. Peter 캡처=-1 (반대면 형상 붕괴)")
+    a = ap.parse_args()
+    n, ntr, nte = turntable_transforms(
+        a.image_dir, a.out_dir, rel_subdir=a.rel_subdir, radius=a.radius,
+        elevation_deg=a.elevation, fov_x_deg=a.fov, test_every=a.test_every, direction=a.direction)
+    print(f"transforms 생성: {n}프레임 → train {ntr} / test {nte}  "
+          f"(direction={a.direction}, elev={a.elevation}, radius={a.radius}, fov={a.fov})")
