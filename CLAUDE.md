@@ -1,10 +1,10 @@
 # CLAUDE.md — Radiance (Bible Worlds · Unified 3DGS Asset PoC)
 
-> Keep this lean: always-on project conventions only. Execution steps / the runbook live in `radiance.org` (the working notebook).
+> Keep this lean: always-on project conventions only. The step-by-step pipeline lives in `docs/head_mp4_to_3dgs_pipeline.org`.
 
 ## Project identity
 Codename: **Radiance**. Part of the **Bible Worlds** program — historically and scripturally accurate 3D world environments for media production (MediaCenter-affiliated).
-Current work: a PoC proving that a **single canonical 3DGS asset (Peter / 베드로) supports relight, edit, and compose**.
+Current work: a PoC proving that a **single canonical 3DGS asset (Peter) supports relight, edit, and compose**.
 
 ## Canonical principles (hard rules)
 - **OpenUSD is the canonical file format** (file-based, not a database). No new server infrastructure needed; existing MAM storage suffices.

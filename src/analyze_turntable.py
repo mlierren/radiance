@@ -1,18 +1,34 @@
-"""[Step 2] 턴테이블 회전 구조 분석 + 정지/중복 꼬리 탐지.
+"""[Step 2] Turntable rotation-structure analysis + automatic trim of still/duplicate ranges.
 
-추출된 프레임 폴더를 받아:
-  1) 인접 프레임 상관(ZNCC)으로 끝의 '정지 꼬리'를 자동 탐지
-  2) 프레임0(정면) 대비 상관(c0)으로 '한 바퀴 닫힘'(정면 재일치) 지점을 탐지
-     → analytic pose는 [0°,360°) 균등분배 규약이므로, 정면으로 되돌아온
-       프레임(360°≈0°) 및 이후는 '정면 중복'이라 반드시 제거해야 한다.
-       (남기면 같은 정면이 0°와 ~357°+ 두 각도로 학습되어 정면이 두 겹/ghost.)
-  3) 확인용 몽타주 PNG 저장(반드시 눈으로 정면→후면→정면 + 끝-시작 비중복 확인)
+Takes the extracted-frames folder, *deterministically* computes the valid one-revolution
+range, and exports a machine-readable =trim.json= (the next step, make_masks, reads it
+automatically). Human/Claude eyes only do 'post-hoc verification' via the saved montage
+(the script makes the decision).
 
-사용법:
-  python src/analyze_turntable.py <frames_dir> [--montage out.png]
-                                  [--stat-th 0.9999] [--wrap-th 0.98]
+What it detects:
+  1) leading-still : still (frontal hold) range at the start — must be removed.
+     (Otherwise the same front is trained at 0°,Δ,2Δ… different angles → front smear/ghost.)
+  2) trailing-still: still tail at the end — removed.
+  3) wrap-closure  : the point that returns to the front after one revolution (≈360°) —
+     removed from that frame on.
+     (Analytic poses use the [0°,360°) uniform-spacing convention, so a duplicated front = double layer/ghost.)
+
+Still detection is *adaptive* (no fixed threshold). For adjacent ZNCC correlation adj:
+  m = median(adj)                      # typical 'mid-rotation' correlation (robust by majority)
+  still ⇔ (1-adj) < alpha*(1-m)        # still if the change is below alpha of the usual rotation change
+It measures contrast, so it adapts even when rotation speed / detail / compression noise vary per clip.
+(A fixed threshold breaks both ways: too tight mistakes slow rotation for still and over-trims;
+ too loose misses noisy stills and leaves a ghost.)
+
+Usage:
+  python src/analyze_turntable.py <frames_dir> [--alpha 0.25] [--wrap-th 0.98]
+                                  [--abs-still-th 0.9999] [--montage out.png]
+Outputs:
+  <frames_dir>/../trim.json   {"start":S,"end":E,...}  (end is exclusive = slice S:E)
+  <frames_dir>/../_contact.png  verification montage (DROP/KEEP/DUP cells marked)
+  one line 'TRIM S:E' to stdout (for parsing).
 """
-import argparse, os
+import argparse, json, os
 import numpy as np
 from PIL import Image, ImageDraw
 
@@ -25,7 +41,7 @@ def load_gray(frames_dir, size=(160, 90)):
 
 
 def zncc_matrix(g):
-    """평탄화 → 평균제거 → 정규화. corr(i,j)=gf[i]·gf[j] (피어슨=ZNCC)."""
+    """Flatten → mean-subtract → normalize. corr(i,j)=gf[i]·gf[j] (Pearson = ZNCC)."""
     n = len(g)
     gf = g.reshape(n, -1)
     gf = gf - gf.mean(1, keepdims=True)
@@ -33,43 +49,69 @@ def zncc_matrix(g):
     return gf
 
 
-def detect_still_tail(adj, stat_th):
-    """뒤에서부터 인접상관>stat_th(정지) 구간을 제거한 마지막 이동 프레임 인덱스."""
+def adaptive_still_th(adj, alpha, abs_floor=None):
+    """Derive the still threshold adaptively from the 'mid-rotation correlation median'.
+
+    m = median(adj) = typical adjacent correlation during rotation (rotation frames dominate,
+    so the median sits there).
+    still_th = 1 - alpha*(1-m).  If abs_floor is given, clamp to at least that (lower bound).
+    Returns (still_th, m).
+    """
+    m = float(np.median(adj))
+    gap = max(1.0 - m, 1e-5)                              # contrast span between still (≈1) and rotation (m)
+    still_th = 1.0 - alpha * gap
+    if abs_floor is not None:
+        still_th = max(still_th, abs_floor)
+    return still_th, m
+
+
+def detect_leading_still(adj, still_th):
+    """Count of consecutive still pairs (adj>still_th) at the start = first moving-frame index (= keep start)."""
+    k = 0
+    while k < len(adj) and adj[k] > still_th:
+        k += 1
+    return k                                             # frames 0..k-1 are the frontal still (duplicate) → drop; keep from frame k
+
+
+def detect_trailing_still(adj, still_th):
+    """Last moving-frame index after removing the still tail (adj>still_th) at the end."""
     last = len(adj)                                      # = n-1
-    while last > 0 and adj[last - 1] > stat_th:
+    while last > 0 and adj[last - 1] > still_th:
         last -= 1
     return last
 
 
 def detect_wrap_closure(c0, wrap_th):
-    """프레임0(정면)으로 되돌아온 '한 바퀴 닫힘' 지점을 찾는다.
+    """The 'one-revolution closure' point that returns to frame 0 (front).
 
-    회전 후반부(back half)에서 c0(=프레임0과의 상관)가 다시 올라가 wrap_th를
-    처음 넘는 프레임 = 정면 재일치(≈360°). 그런 프레임이 없으면(끝이 정면으로
-    안 돌아옴) 후반부 최대상관 위치를 참고로만 반환한다.
-
-    Returns: (idx, corr, strong)  strong=True 면 정면 중복으로 판단해 잘라야 함.
+    In the back half, the first frame where c0 rises past wrap_th again = frontal re-match (≈360°).
+    If none, return the back-half max-correlation position for reference only. If strong=True,
+    trim from that frame on.
+    Returns (idx, corr, strong).
     """
     n = len(c0)
-    lo = max(2, n // 2)                                  # 시작 근방은 제외하고 후반부만
+    lo = max(2, n // 2)
     back = np.arange(lo, n)
     cb = c0[back]
     strong = back[cb >= wrap_th]
     if len(strong):
-        idx = int(strong[0])                            # 가장 이른 정면 재일치
+        idx = int(strong[0])
         return idx, float(c0[idx]), True
     idx = int(back[int(np.argmax(cb))])
     return idx, float(c0[idx]), False
 
 
-def save_montage(frames_dir, files, last, out, dup_idx=None, cols=5, cell=(200, 200)):
-    idx = list(range(0, last + 1, max(1, (last + 1) // 14))) + [last]
-    idx = sorted(set(i for i in idx if i <= last))
+def save_montage(frames_dir, files, start, end, out, wrap_idx=None, cols=5, cell=(200, 200)):
+    """Verification montage: uniform samples of the keep range + DROP (leading still f0) + KEEP start + DUP (wrap) cells."""
+    last = end - 1
+    idx = list(range(start, last + 1, max(1, (last - start + 1) // 12))) + [last]
     labels = {i: (f"f{i}", (255, 255, 0)) for i in idx}
-    # 잘라낼 '정면 중복' 프레임을 함께 보여줘 첫 프레임(f0)과 눈으로 비교하게 한다.
-    if dup_idx is not None and 0 <= dup_idx < len(files) and dup_idx not in labels:
-        idx.append(dup_idx)
-        labels[dup_idx] = (f"DUP f{dup_idx} (drop)", (255, 80, 80))
+    if start > 0:                                        # representative of the dropped leading still (first frame)
+        labels[0] = ("DROP lead f0", (255, 80, 80)); idx.append(0)
+        labels[start] = (f"KEEP start f{start}", (80, 255, 80))
+    if wrap_idx is not None and 0 <= wrap_idx < len(files):
+        labels[wrap_idx] = (f"DUP f{wrap_idx} (drop)", (255, 80, 80)); idx.append(wrap_idx)
+    idx = sorted(set(idx))
     W, H = cell
     rows = (len(idx) + cols - 1) // cols
     sheet = Image.new("RGB", (cols * W, rows * H), (30, 30, 30))
@@ -86,50 +128,65 @@ def save_montage(frames_dir, files, last, out, dup_idx=None, cols=5, cell=(200, 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("frames_dir")
-    ap.add_argument("--montage", default=None, help="확인용 몽타주 저장 경로(기본: <frames_dir>/../_contact.png)")
-    ap.add_argument("--stat-th", type=float, default=0.9999, help="정지로 간주할 인접프레임 상관 임계값")
+    ap.add_argument("--montage", default=None, help="verification montage path (default: <frames_dir>/../_contact.png)")
+    ap.add_argument("--trim-json", default=None, help="trim-range output path (default: <frames_dir>/../trim.json)")
+    ap.add_argument("--alpha", type=float, default=0.25,
+                    help="still-detection sensitivity. still ⇔ (1-adj) < alpha*(1-median(adj)). Smaller = stricter")
+    ap.add_argument("--abs-still-th", type=float, default=None,
+                    help="absolute lower bound for the still threshold (optional). Combined with the adaptive value via max")
     ap.add_argument("--wrap-th", type=float, default=0.98,
-                    help="정면 재일치(한 바퀴 닫힘)로 간주할 프레임0 대비 상관 임계값")
+                    help="correlation threshold vs frame 0 to count as frontal re-match (one-revolution closure)")
     args = ap.parse_args()
 
     files, g = load_gray(args.frames_dir)
     n = len(files)
     gf = zncc_matrix(g)
-    adj = (gf[:-1] * gf[1:]).sum(1)                      # 인접 프레임 상관
-    c0 = gf @ gf[0]                                      # 프레임0 대비 상관
+    adj = (gf[:-1] * gf[1:]).sum(1)                      # adjacent-frame correlation
+    c0 = gf @ gf[0]                                      # correlation vs frame 0 (front)
 
-    last_still = detect_still_tail(adj, args.stat_th)    # 정지꼬리 제거 후 마지막 이동 프레임
+    still_th, m = adaptive_still_th(adj, args.alpha, args.abs_still_th)
+    lead = detect_leading_still(adj, still_th)           # keep-start index
+    last_still = detect_trailing_still(adj, still_th)    # last moving frame after removing the still tail
     wrap_idx, wrap_corr, wrap_strong = detect_wrap_closure(c0, args.wrap_th)
 
+    end = last_still + 1                                 # exclusive
     if wrap_strong:
-        last_use = min(last_still, wrap_idx - 1)         # 정면 재일치 직전까지만 = [0°,360°)
-    else:
-        last_use = last_still
+        end = min(end, wrap_idx)                         # only up to just before frontal re-match = [0°,360°)
+    start = lead
+    if start >= end:                                     # safety guard (degenerate)
+        start, end = 0, n
 
-    print(f"총 프레임: {n}")
-    print(f"[정지꼬리] 인접상관>{args.stat_th}: frame 0..{last_still} 이동 "
-          f"(이후 {last_still + 1}..{n - 1} 정지)")
-    if wrap_strong:
-        print(f"[한바퀴닫힘] ⚠️ frame {wrap_idx} 이 시작(정면)과 재일치 "
-              f"(corr={wrap_corr:.4f} ≥ {args.wrap_th}).")
-        print(f"            analytic pose는 [0°,360°) 규약 → frame {wrap_idx} 및 이후는 "
-              f"'정면 중복'이라 제거(안 그러면 정면 두 겹/ghost).")
+    n_keep = end - start
+    print(f"total frames: {n}")
+    print(f"[adaptive threshold] rotation median m={m:.5f} → still threshold still_th={still_th:.5f} (alpha={args.alpha})")
+    if lead > 0:
+        print(f"[leading still] frame 0..{lead - 1} frontal hold (duplicate) → removed. keep start = frame {lead}.")
     else:
-        print(f"[한바퀴닫힘] 강한 정면 재일치 없음 "
-              f"(후반부 최대 corr={wrap_corr:.4f} @frame {wrap_idx} < {args.wrap_th}) "
-              f"→ 끝이 정면으로 안 돌아옴, 중복 가능성 낮음.")
-    print(f"  ✅ 권장 사용 범위: frame 0..{last_use}  ({last_use + 1}장)")
-    print(f"[참고] 최저상관(후면≈180°) 위치: frame {int(c0.argmin())}/{n} "
-          f"— 후면 자기유사로 부정확할 수 있음.")
-    print(f"       ※ 최종 판단은 반드시 몽타주로: 정면→후면→정면 균일 회전 + "
-          f"끝 프레임이 첫 프레임(f0)과 겹치지 않는지 확인.")
+        print(f"[leading still] none (rotating from the start).")
+    print(f"[still tail] last moving frame {last_still} (then {last_still + 1}..{n - 1} still)")
+    if wrap_strong:
+        print(f"[wrap closure] ⚠️ frame {wrap_idx} re-matches the front (corr={wrap_corr:.4f} ≥ {args.wrap_th}) "
+              f"→ removed from that frame on.")
+    else:
+        print(f"[wrap closure] no strong frontal re-match (back-half max corr={wrap_corr:.4f} @f{wrap_idx} < {args.wrap_th}).")
+    print(f"  ✅ valid range: frame {start}..{end - 1}  (slice {start}:{end}, {n_keep} frames)")
+    print(f"[note] lowest correlation (back ≈180°): frame {int(c0.argmin())}/{n} — may be inaccurate due to back-view self-similarity.")
+
+    trim_path = args.trim_json or os.path.join(os.path.dirname(args.frames_dir.rstrip('/')), "trim.json")
+    with open(trim_path, "w") as fh:
+        json.dump({"start": int(start), "end": int(end), "n_total": int(n), "n_keep": int(n_keep),
+                   "leading_still": int(lead), "trailing_last_move": int(last_still),
+                   "wrap_idx": int(wrap_idx), "wrap_strong": bool(wrap_strong),
+                   "wrap_corr": round(float(wrap_corr), 4),
+                   "moving_median": round(m, 5), "still_th": round(still_th, 5),
+                   "alpha": args.alpha}, fh, indent=2)
+    print(f"trim.json saved: {trim_path}")
 
     out = args.montage or os.path.join(os.path.dirname(args.frames_dir.rstrip('/')), "_contact.png")
-    save_montage(args.frames_dir, files, last_use, out,
-                 dup_idx=(wrap_idx if wrap_strong else None))
-    print(f"확인용 몽타주 저장: {out}")
-    if wrap_strong:
-        print(f"  → 빨간 'DUP f{wrap_idx}' 칸이 f0(정면)과 같아 보이면 제대로 잡힌 것(그 프레임부터 제거).")
+    save_montage(args.frames_dir, files, start, end, out,
+                 wrap_idx=(wrap_idx if wrap_strong else None))
+    print(f"verification montage saved: {out}")
+    print(f"TRIM {start}:{end}")                          # one line for parsing
 
 
 if __name__ == "__main__":

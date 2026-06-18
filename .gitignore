@@ -11,6 +11,8 @@
 
 # --- Scratch / working notes ---
 tmp/
+# local demo / scratch asset copies (plys, mp4s, glbs, stray pngs) — never committed
+experiments/demo/
 
 # ==========================================================================
 # Project artifacts (large; live on the Pod Network Volume, not in git)

@@ -1,13 +1,13 @@
-"""3DGS .ply -> .glb 변환 (point cloud / mesh).
+"""3DGS .ply -> .glb conversion (point cloud / mesh).
 
-3DGS(가우시안 splat)는 glTF에 네이티브 개념이 없어 둘 중 하나로 *손실 변환*한다:
-  - points: 가우시안 중심점 + SH-DC 색 → GLB POINTS 프리미티브(데이터에 충실, 점으로 보임)
-  - mesh  : 밀도 그리드 + marching cubes 표면 재구성 + 최근접 색 → GLB 메시(솔리드, 더 뭉툭/lossy)
-좌표: 3DGS는 Z-up, glTF는 Y-up → (x,y,z)→(x,z,-y) 회전 적용. 중심을 원점으로 이동.
+3DGS (Gaussian splats) has no native concept in glTF, so convert *lossily* one of two ways:
+  - points: gaussian centers + SH-DC color → GLB POINTS primitive (faithful to data, shows as points)
+  - mesh  : density grid + marching-cubes surface reconstruction + nearest color → GLB mesh (solid, blunter/lossy)
+Coords: 3DGS is Z-up, glTF is Y-up → apply (x,y,z)→(x,z,-y) rotation. Recenter to origin.
 
-사용법:
+Usage:
   python src/ply_to_glb.py IN.ply OUT_PREFIX [--mode both|points|mesh] [--opacity 0.3] [--grid 192]
-출력: OUT_PREFIX_points.glb / OUT_PREFIX_mesh.glb
+Output: OUT_PREFIX_points.glb / OUT_PREFIX_mesh.glb
 """
 import argparse, numpy as np
 
@@ -52,12 +52,12 @@ def to_mesh_glb(xyz, rgb, out, grid=192, level=0.5):
     vol = np.zeros(dims, np.float32)
     idx = ((xyz - lo) / res + 2).astype(int)
     idx = np.clip(idx, 0, np.array(dims) - 1)
-    np.add.at(vol, (idx[:, 0], idx[:, 1], idx[:, 2]), 1.0)   # 점 밀도 누적
+    np.add.at(vol, (idx[:, 0], idx[:, 1], idx[:, 2]), 1.0)   # accumulate point density
     vol = ndi.gaussian_filter(vol, sigma=1.2)
     vol /= vol.max() + 1e-9
     verts, faces, _, _ = measure.marching_cubes(vol, level=level * vol[vol > 0].mean())
-    verts_world = verts * res + lo - 2 * res                  # 그리드→월드 좌표
-    # 최근접 가우시안 색 이식
+    verts_world = verts * res + lo - 2 * res                  # grid → world coords
+    # transplant color from nearest gaussian
     tree = cKDTree(xyz)
     _, nn = tree.query(verts_world, k=1)
     vcol = (np.clip(rgb[nn], 0, 1) * 255).astype(np.uint8)
@@ -71,8 +71,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("in_ply"); ap.add_argument("out_prefix")
     ap.add_argument("--mode", choices=["both", "points", "mesh"], default="both")
-    ap.add_argument("--opacity", type=float, default=0.3, help="이 불투명도 이상만 사용")
-    ap.add_argument("--grid", type=int, default=192, help="mesh 밀도 그리드 해상도")
+    ap.add_argument("--opacity", type=float, default=0.3, help="use only gaussians above this opacity")
+    ap.add_argument("--grid", type=int, default=192, help="mesh density grid resolution")
     a = ap.parse_args()
 
     xyz, op, rgb = read_3dgs_ply(a.in_ply)
@@ -80,7 +80,7 @@ def main():
     xyz, rgb = xyz[keep], rgb[keep]
     print(f"loaded {keep.sum():,} / {len(keep):,} gaussians (opacity>{a.opacity})")
     xyz = zup_to_yup(xyz)
-    xyz = xyz - xyz.mean(0)                                   # 원점으로 이동
+    xyz = xyz - xyz.mean(0)                                   # recenter to origin
 
     if a.mode in ("both", "points"):
         to_points_glb(xyz, rgb, a.out_prefix + "_points.glb")

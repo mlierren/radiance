@@ -5,8 +5,8 @@
 # ///
 """RunPod Launcher for Radiance — Bible Worlds Unified 3DGS Asset PoC.
 
-Spins up a GPU pod for the Relightable-3D-Gaussians + Gaussian-Grouping stack
-described in radiance.org §1 (Pod bootstrap). The design mirrors the runbook:
+Spins up a GPU pod for the Relightable-3D-Gaussians + Gaussian-Grouping stack.
+The pod bootstrap design:
 
   - A Network Volume is mounted at /workspace and holds EVERYTHING persistent:
     the uv venv (/workspace/envs/r3dg, with compiled CUDA extensions) AND the
@@ -90,7 +90,7 @@ except ImportError:
 
 BASE_POD_NAME = "radiance"
 
-# CUDA 11.8 devel + Ubuntu 22.04. radiance.org §1.2: Relightable3DGaussian
+# CUDA 11.8 devel + Ubuntu 22.04. Relightable3DGaussian
 # recommends compiling against CUDA 11.8 (the stack pins PyTorch 1.12.1+cu116).
 # A *devel* image is required so nvcc is present for building
 # r3dg-rasterization / bvh / simple-knn / nvdiffrast.
@@ -100,7 +100,7 @@ IMAGE_NAME_GPU = "runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04"
 # This is the repo's reference GPU (24GB). A6000 (same arch, 48GB) also works.
 DEFAULT_GPU_TYPE = "NVIDIA GeForce RTX 3090"
 
-# Network volume mounts at /workspace (radiance.org §1.0). All persistent state
+# Network volume mounts at /workspace. All persistent state
 # (venv, managed python, repos, data, outputs) lives there; container disk stays small.
 VOLUME_MOUNT_PATH = "/workspace"
 CONTAINER_DISK_SIZE = 40            # GB — ephemeral OS layer only
@@ -110,13 +110,13 @@ DEFAULT_NETWORK_VOLUME_NAME = "radiance-vol"
 # uv venv w/ torch + compiled CUDA ext (~10GB) + frames/COLMAP + checkpoints/outputs.
 DEFAULT_NETWORK_VOLUME_SIZE = 100   # GB
 
-# Where the canonical repo + external repos live on the volume (radiance.org §1.0).
+# Where the canonical repo + external repos live on the volume.
 WORKSPACE_REPO_DIR = "/workspace/radiance"
 ENV_PREFIX = "/workspace/envs/r3dg"      # uv venv
 PYTHON_VERSION = "3.10"                   # uv-managed; cu116 wheels exist for cp310
 UV_HOME = "/workspace/uv"                 # uv-managed python + cache, on the volume
 
-# External repos to clone on the pod (radiance.org §1.2-1.3, Appendix).
+# External repos to clone on the pod.
 THIRD_PARTY_REPOS = [
     # (dir_name, git_url, clone_recursive)
     ("Relightable3DGaussian", "https://github.com/NJU-3DV/Relightable3DGaussian.git", True),
@@ -322,7 +322,7 @@ def _build_startup_script(
     repo_url: Optional[str] = None,
     bootstrap_env: bool = True,
 ) -> str:
-    """Build the pod startup script per radiance.org §1 (Pod bootstrap).
+    """Build the pod startup script (Pod bootstrap).
 
     The script is idempotent and volume-aware: every expensive artifact (uv
     venv, compiled CUDA extensions, repo clones) lands on /workspace, so a pod
@@ -334,7 +334,7 @@ def _build_startup_script(
     if repo_url:
         repo_url_lit = json.dumps(repo_url)
         repo_clone = f"""
-# --- Canonical repo (radiance.org §1.1) ---
+# --- Canonical repo ---
 if [ -d "{WORKSPACE_REPO_DIR}/.git" ]; then
     echo "[REPO] {WORKSPACE_REPO_DIR} present; pulling..."
     git -C "{WORKSPACE_REPO_DIR}" pull --ff-only || echo "[REPO] pull skipped"
@@ -363,7 +363,7 @@ echo "[REPO] No repo URL provided. Push your local radiance repo and re-launch"
 echo "[REPO] with --repo-url, or 'git clone' into {WORKSPACE_REPO_DIR} manually."
 """
 
-    # --- Clone external repos (radiance.org §1.2-1.3) ---
+    # --- Clone external repos ---
     third_party_lines = [f'mkdir -p "{WORKSPACE_REPO_DIR}/third_party"']
     for dir_name, url, recursive in THIRD_PARTY_REPOS:
         dest = f"{WORKSPACE_REPO_DIR}/third_party/{dir_name}"
@@ -377,12 +377,12 @@ else
 fi""")
     third_party_clone = "\n".join(third_party_lines)
 
-    # --- uv venv + CUDA extensions + r3dg kernel (radiance.org §1.2 & §1.4) ---
+    # --- uv venv + CUDA extensions + r3dg kernel ---
     env_bootstrap = ""
     if bootstrap_env:
         r3dg_dir = f"{WORKSPACE_REPO_DIR}/third_party/Relightable3DGaussian"
         env_bootstrap = f"""
-# --- uv venv 'r3dg' on the volume (uv replaces conda; radiance.org §1.2) ---
+# --- uv venv 'r3dg' on the volume (uv replaces conda) ---
 # Both the venv AND its base interpreter must live on the volume to survive
 # pod re-creation, so uv's managed Python + cache are pinned under {UV_HOME}.
 export UV_PYTHON_INSTALL_DIR="{UV_HOME}/python"
@@ -420,7 +420,7 @@ else
     # at runtime. Installing it before torch keeps uv from pulling numpy 2.x.
     "$UV" pip install --python "$VPY" "numpy<2" || echo "[ENV] numpy pin issue"
 
-    # Pinned stack (radiance.org §1.2). Ampere-compatible PyTorch 1.12.1+cu116.
+    # Pinned stack. Ampere-compatible PyTorch 1.12.1+cu116.
     "$UV" pip install --python "$VPY" \\
         torch==1.12.1+cu116 torchvision==0.13.1+cu116 torchaudio==0.12.1+cu116 \\
         --index-url https://download.pytorch.org/whl/cu116 || echo "[ENV] torch install issue"
@@ -449,10 +449,10 @@ else
         || echo "[ENV] runtime deps issue"
 fi
 
-# COLMAP + ffmpeg are native apps (not pip): install via apt (radiance.org Stage 1).
+# COLMAP + ffmpeg are native apps (not pip): install via apt.
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq colmap ffmpeg || echo "[ENV] colmap/ffmpeg apt issue"
 
-# --- Register the r3dg Jupyter kernel for emacs-jupyter (radiance.org §1.4) ---
+# --- Register the r3dg Jupyter kernel for emacs-jupyter ---
 VPY="{ENV_PREFIX}/bin/python"
 "$UV" pip install --python "$VPY" ipykernel jupyterlab || echo "[ENV] jupyter install issue"
 "$VPY" -m ipykernel install --user --name r3dg --display-name "r3dg" || echo "[ENV] kernel register issue"
@@ -471,10 +471,10 @@ for mod in ('simple_knn','r3dg_rasterization','bvh','nvdiffrast'):
 """
     else:
         env_bootstrap = """
-echo "[ENV] --skip-bootstrap set. Build the uv venv manually per the README / radiance.org §1.2-1.4."
+echo "[ENV] --skip-bootstrap set. Build the uv venv manually per the README."
 """
 
-    # --- Jupyter launch (radiance.org §1.4) ---
+    # --- Jupyter launch ---
     jupyter_launch = ""
     if not no_jupyter:
         # If the r3dg env exists, serve from it (so the r3dg kernel is native);
@@ -514,7 +514,7 @@ exec > >(tee /workspace/startup.log) 2>&1
 echo "=== Radiance Pod Startup ==="
 date
 
-# --- Workspace layout (radiance.org §1.0) ---
+# --- Workspace layout ---
 mkdir -p /workspace/data /workspace/outputs /workspace/envs
 
 # --- System deps (build toolchain for CUDA extensions) ---
@@ -544,7 +544,7 @@ echo "[OK] Radiance bootstrap done at $(date)"
 
 
 # ============================================================================
-# Repo URL resolution (local repo -> cloned on the pod, radiance.org §1.0)
+# Repo URL resolution (local repo -> cloned on the pod)
 # ============================================================================
 
 def _normalize_github_https(url: str) -> str:
@@ -608,7 +608,7 @@ def create_pod(
         print(f"Volume {volume_id} in datacenter {volume_datacenter}")
     else:
         print("WARNING: no --volume-id. Without a network volume the uv venv "
-              "and repos are LOST on pod deletion (radiance.org §1.0 relies on it).")
+              "and repos are LOST on pod deletion.")
 
     print(f"Creating pod '{target_pod_name}' with GPU {gpu_type}...")
     print(f"  Image: {IMAGE_NAME_GPU}")
@@ -653,7 +653,7 @@ def create_pod(
     }
 
     if volume_id:
-        # Network volume mounts at /workspace (radiance.org §1.0).
+        # Network volume mounts at /workspace.
         pod_kwargs["network_volume_id"] = volume_id
         pod_kwargs["volume_mount_path"] = VOLUME_MOUNT_PATH
         pod_kwargs["volume_in_gb"] = 0
@@ -758,7 +758,7 @@ def show_pod_status(api_key: str, pod_id: Optional[str] = None, pod_name: Option
         print("\nAccess:")
         if ssh_ip and ssh_port:
             print(f"  SSH:           ssh root@{ssh_ip} -p {ssh_port}")
-            print("\n  emacs-jupyter workflow (radiance.org §1.4):")
+            print("\n  emacs-jupyter workflow:")
             print(f"    1) Tunnel:   ssh -L {JUPYTER_PORT}:localhost:{JUPYTER_PORT} "
                   f"root@{ssh_ip} -p {ssh_port}")
             print(f"    2) Connect:  http://localhost:{JUPYTER_PORT}/lab?token={JUPYTER_TOKEN}")
@@ -931,7 +931,7 @@ Quick start:
                              "(or set RADIANCE_REPO_URL in .env.runpod.local)")
     parser.add_argument("--skip-bootstrap", action="store_true",
                         help="Don't build the uv venv at boot (do it manually per "
-                             "the README / radiance.org §1.2-1.4). Repos are still cloned.")
+                             "the README). Repos are still cloned.")
     parser.add_argument("--cloud-type", type=str, default="SECURE",
                         choices=["ALL", "SECURE", "COMMUNITY"],
                         help="Cloud type filter (default: SECURE). The emacs-jupyter "

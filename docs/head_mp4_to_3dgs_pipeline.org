@@ -1,367 +1,202 @@
-#+TITLE: Peter 머리 — mp4 영상에서 3D 모델(3DGS)로: 절차·소프트웨어·설정
-#+AUTHOR: Kim
+#+TITLE: Peter's Head — From an MP4 Video to a 3D Model (3DGS): Steps, Software, Configuration
+#+AUTHOR: Darren Kim
 #+DATE: 2026-06-15
-#+OPTIONS: toc:2 num:t
+#+OPTIONS: toc:2 num:t ^:nil
 
-# 미팅 Agenda:
-#   Kim will show the process to convert Peter's head from mp4 video to 3D model.
-#   Steps and software to do that, with configuration.
-# 본 문서는 한국어 초안. 충분히 검토·보완 후 영문으로 최종 번역.
-#
-# [개념 설명 규칙] 한국어판은 이해를 돕는 개념 설명을 포함한다. 영문 최종판에서는 제외한다.
-#   - 본문 중 인라인 설명: 줄 맨앞에 "💡" 표시 (영문 번역 시 이 줄들은 건너뜀)
-#   - 큰 개념/용어 풀이: 맨 끝 "부록 A. 개념·용어 풀이" 에 모음 (영문판 제외)
+# ─────────────────────────────────────────────────────────────────────────────
+# PDF export (Emacs: C-c C-e l p).  Engine MUST be LuaLaTeX — it renders the
+# Unicode box-drawing diagram (─ │ ┌ ▶ ▼ ★) and pulls ★ ≈ → from a fallback font.
+# If your default differs, set: (setq org-latex-pdf-process
+#   '("latexmk -lualatex -interaction=nonstopmode -output-directory=%o %f"))
+# ─────────────────────────────────────────────────────────────────────────────
+#+LATEX_COMPILER: lualatex
+#+LATEX_CLASS: article
+#+LATEX_CLASS_OPTIONS: [11pt,a4paper]
+#+LATEX_HEADER: \usepackage[margin=2.2cm]{geometry}
+#+LATEX_HEADER: \usepackage{fontspec}
+# Latin Modern body for clean typography; DejaVu fallback supplies ★ ≈ → and the
+# box-drawing glyphs Latin Modern lacks (requires luaotfload ≥ 3.12 / TeX Live 2020+).
+#+LATEX_HEADER: \directlua{luaotfload.add_fallback("radiancefallback", {"DejaVu Sans:mode=node;", "DejaVu Sans Mono:mode=node;"})}
+#+LATEX_HEADER: \setmainfont{Latin Modern Roman}[RawFeature={fallback=radiancefallback}]
+#+LATEX_HEADER: \setsansfont{Latin Modern Sans}[RawFeature={fallback=radiancefallback}]
+#+LATEX_HEADER: \setmonofont{DejaVu Sans Mono}[Scale=0.85]
+#+LATEX_HEADER: \usepackage{microtype}
+#+LATEX_HEADER: \usepackage{tabularx,booktabs,ragged2e}
+# Shrink verbatim/example/src blocks so the ASCII diagram + long commands never overflow the margin.
+#+LATEX_HEADER: \makeatletter\renewcommand{\verbatim@font}{\ttfamily\footnotesize}\makeatother
+# Make tabularx X-columns wrap ragged-right (no ugly inter-word stretching).
+#+LATEX_HEADER: \renewcommand{\tabularxcolumn}[1]{>{\RaggedRight\arraybackslash}p{#1}}
 
-* 1. 개요 (Overview)
+* Overview
+- *Goal:* turn one turntable MP4 of Peter's head into a 3D model (3D Gaussian Splatting, =.ply=).
+- *Input:* subject rotates in place, camera fixed; background removed (or solid).
+- *Output:* a standard 3DGS =.ply= (proportion-corrected) that opens directly in viewers like SuperSplat.
+- *Key idea:* a turntable is a known circular orbit, so we *assign* camera poses analytically instead of
+  *estimating* them (COLMAP). Then train plain 3DGS and apply a post-hoc proportion fix.
+- *One line:* =mp4 → frames → masks → analytic poses (★rotation direction) → 3DGS → Z-rescale → .ply=
 
-- *목표:* Peter 머리(얼굴) **턴테이블 mp4 영상 1개** → **3D 모델(3D Gaussian Splatting, .ply)**.
-- *입력:* 인물이 제자리에서 한 바퀴 회전하는 영상(카메라 고정). 배경 제거(또는 단색).
-- *출력:* SuperSplat 등에서 바로 여는 표준 3DGS =.ply= (인체 비율 보정 완료).
-- *핵심 아이디어:* 턴테이블은 *원형 궤도*이므로, 카메라 포즈를 추정(COLMAP)하지 않고
-  **해석적으로 부여**한다. 그 뒤 일반(free) 3DGS 학습 → 사후 비율 보정.
-- *한 줄 요약:* =mp4 → 프레임 → 마스크 → 해석적 포즈(★회전방향) → 3DGS 학습 → Z-비율 보정 → .ply=
-
-* 2. 전체 파이프라인 (Diagram)
-
+* Pipeline
 #+begin_example
-  ┌──────────────┐
-  │ turntable.mp4│  1280×720, 24fps, ~238 frames, 1회전 + 정지꼬리
-  └──────┬───────┘
-         │ [1] ffmpeg 프레임 추출
-         ▼
-  ┌──────────────┐
-  │ frames/*.png │  238장
-  └──────┬───────┘
-         │ [2] 회전 분석 → 정지/중복 꼬리 trim (프레임 상관)
-         ▼
-  ┌──────────────┐
-  │ 유효 프레임    │  예: 0–212 (1회전)
-  └──────┬───────┘
-         │ [3] 전경 마스크 → RGBA (alpha)
-         ▼
-  ┌──────────────┐        [4] 해석적 턴테이블 포즈
-  │ rgba/*.png   │───────────┐  ★ direction=-1 (회전방향)
-  └──────────────┘           ▼  elev=0, radius=3, fov=40
-                     ┌──────────────────────┐
-                     │ transforms_*.json    │ (train/test)
-                     └──────────┬───────────┘
-                                │ [5] 3DGS 학습 (free, prior 없음)
-                                ▼
-                     ┌──────────────────────┐
-                     │ point_cloud.ply      │  세로로 길쭉(단일고도 한계)
-                     │ chkpnt30000.pth      │
-                     └──────────┬───────────┘
-                                │ [6] 사후 Z-rescale (실루엣 비율로)
-                                ▼
-                     ┌──────────────────────┐
-                     │ *_zcorr.ply (최종)    │ → [7] SuperSplat / 턴테이블 렌더
-                     └──────────────────────┘
+  turntable.mp4 ──[1] extract──▶ frames ──[2] trim still tail──▶ valid 1 revolution
+        │                                                              │
+        │                                              [3] foreground masks → RGBA
+        ▼                                                              ▼
+  [4] analytic turntable poses ★direction=-1, elev=0, r=3, fov=40 ─▶ transforms_*.json
+        │                                                              │
+        └──────────────[5] 3DGS training (free, no prior)─────────────┘
+                                   ▼
+                  point_cloud.ply  (vertically stretched: single-elevation limit)
+                                   │ [6] post-hoc Z-rescale (match silhouette)
+                                   ▼
+                  *_zcorr.ply  ──[7] SuperSplat / turntable render
 #+end_example
 
-* 3. 소프트웨어 / 환경 스택 (Software stack)
+* Software
+#+ATTR_LATEX: :environment tabularx :width \linewidth :align lXX :booktabs t
+| Component   | Software (version)                                  | Role                               |
+|-------------+-----------------------------------------------------+------------------------------------|
+| Compute     | RunPod (A100 / A6000, Ampere)                       | Remote GPU; network volume storage |
+| Core engine | Relightable3DGaussian (r3dg)                        | 3DGS training/render (CUDA)         |
+| DL backend  | PyTorch 1.12.1+cu116, torchvision 0.13.1            | Ampere sm_80/86                     |
+| CUDA ext.   | r3dg-rasterization, simple-knn, bvh, nvdiffrast     | rasterize / kNN / ray queries       |
+| Numerics/IO | numpy, scipy, Pillow(<10), opencv, plyfile, ffmpeg  | masks, poses, frames, .ply          |
+| Viewer      | SuperSplat                                          | inspect .ply                        |
 
-| 구분          | 소프트웨어 (버전)                                     | 역할                                 |
-|---------------+-----------------------------------------------------+--------------------------------------|
-| 컴퓨트         | RunPod (A100-SXM4-80GB / A6000, Ampere)             | 원격 GPU. 네트워크 볼륨에 영구 저장       |
-| 핵심 엔진      | Relightable3DGaussian (r3dg, 연구코드)               | 3DGS 학습/렌더 (CUDA 래스터라이저)       |
-| 딥러닝         | PyTorch 1.12.1+cu116, torchvision 0.13.1            | 학습 백엔드 (Ampere sm_80/86 호환)     |
-| CUDA 확장     | r3dg-rasterization, simple-knn, bvh, nvdiffrast 0.4 | GPU 전용 가속 모듈 (→부록 A 설명)        |
-| 보조 수치      | numpy 1.26.4, scipy 1.15.3, kornia 0.6.12           | 행렬/이미지/마스크 형태학                |
-| 영상/이미지     | ffmpeg, Pillow 9.5.0(<10 핀), opencv 4.11, imageio  | 프레임 추출, 마스크, I/O                |
-| 포인트클라우드  | plyfile 1.1.3                                       | =.ply= 읽기/쓰기                      |
-| 뷰어          | SuperSplat (웹)                                     | =.ply= 결과 확인                      |
-| 실행 인터프리터 | =/workspace/envs/r3dg/bin/python= (Python 3.10)     | 모든 학습/스크립트는 이걸로              |
+- *Why r3dg:* for a plain 3DGS one could use lighter, permissively-licensed tools (gsplat [Apache 2.0],
+  the original INRIA gaussian-splatting). We chose r3dg because the program continues to *relight / edit /
+  compose*: it is 3DGS-native and decomposes PBR material (albedo/roughness/normal) + environment light in
+  the same pipeline — one consistent asset from geometry to relight.
+- *License:* r3dg is research code (non-commercial, INRIA-rasterizer-based) → *PoC / internal demo only*.
+  Production target: reimplement on gsplat (Apache 2.0).
+- *GPU requirement — architecture (must) + VRAM:* prebuilt CUDA extensions target =sm_80/86=, so an
+  *Ampere* GPU runs with no recompile.
 
-- *GPU 사양 — 아키텍처(필수) + VRAM:* 사전 빌드된 CUDA 확장이 =sm_80/86= 용이라 *Ampere 세대* GPU여야
-  재컴파일 없이 동작한다.
+#+ATTR_LATEX: :environment tabularx :width \linewidth :align lllX :booktabs t
+| Tier        | Example GPU            | VRAM    | Note                                       |
+|-------------+------------------------+---------+--------------------------------------------|
+| Minimum     | RTX A4000 / RTX 3090   | 16GB+   | 720p turntable 3DGS training               |
+| Recommended | RTX 3090 / A5000       | 24GB    | comfortable; launcher default = 3090       |
+| Ideal       | A6000 / A40 / A100     | 48–80GB | headroom for relight and 1080p+ input      |
 
-| 등급   | GPU 예                          | VRAM   | 비고                                          |
-|--------+---------------------------------+--------+-----------------------------------------------|
-| 최소   | RTX A4000 / RTX 3090            | 16GB↑  | 720p 턴테이블 3DGS 학습 가능                   |
-| 권장   | RTX 3090 / A5000                | 24GB   | 여유 있음. launcher 기본 GPU = 3090            |
-| 이상적 | A6000 / A40 / A100              | 48–80GB | relight(neilf, 더 무거움) · 1080p+ 입력 여유   |
+- Avoid RTX 4090/L40 (sm_89), H100 (sm_90), T4/2080 (sm_75) — they require recompiling the extensions.
+- *Reproducibility:* =scripts/runpod_launcher.py= bootstraps the full stack onto the network volume once.
 
-  - ⚠️ *피할 것:* RTX 4090·L40(=sm_89=), H100(=sm_90=), T4·2080(=sm_75=) → CUDA 확장 *재컴파일* 필요.
-  - 검증 기준 환경은 A100-SXM4-80GB. (VRAM 최소치는 보수적 추정 — plain 3DGS 단계는 가볍고 relight 단계가 더 무겁다.)
-- *핵심 엔진(r3dg) 선택 이유:* 단순히 3DGS 결과물만 필요하다면 더 가볍고 라이선스가 자유로운
-  대안(=gsplat= [Apache 2.0], INRIA 원본 gaussian-splatting 등)도 가능하다. 하지만 우리는
-  *relight / edit / compose 까지 이어서* 실험하는 것이 목표이므로, 3DGS-native 이면서 같은
-  파이프라인에서 *PBR 재질(albedo·roughness·normal) + 환경광* 을 분해해주는
-  Relightable3DGaussian 을 선택했다(= 하나의 일관된 자산으로 geometry→relight 연결).
-- ⚠️ 라이선스: r3dg 는 *연구용 코드(비상업, INRIA 래스터라이저 기반)* → **PoC/내부 데모 한정**.
-  프로덕션은 =gsplat= (Apache 2.0)으로 재구현 예정.
-- 환경 재현: =scripts/runpod_launcher.py= 의 부트스트랩이 위 스택을 네트워크 볼륨에 1회 빌드.
-  Pillow 는 반드시 =<10= (torch 1.12 의 tensorboard 가 =Image.ANTIALIAS= 사용).
+* Steps
+Each step is a single command and produces a concrete artifact.
 
-* 4. 단계별 절차 + 설정 (Step by step)
-
-** [0] 입력 영상 규격
-- 인물이 제자리 회전(카메라 고정). 본 사례: =turntable_face.mp4= = 1280×720, 24fps, 238프레임(~9.9s).
-- 배경: 제거됨(또는 단색). 한 바퀴(360°) 회전 후 *끝에 정지 구간*이 있을 수 있음 → [2]에서 제거.
-
-** [1] 프레임 추출 (ffmpeg)
+** [1] Extract frames
 #+begin_src bash
 ffmpeg -i turntable_face.mp4 frames_raw/f_%04d.png
 #+end_src
-💡 (우리 환경 자동화 팁) SSH heredoc 등으로 스크립트를 stdin 으로 흘려 실행할 때만 =-nostdin= 추가.
-   있어도 무해하며 방법 자체엔 필수 아님 → 본문 일반 명령엔 생략. 자세히 →부록 A. (영문판 제외)
-- *산출물:* =frames_raw/*.png= (프레임 이미지, 본 사례 238장).
+- *Output:* =frames_raw/*.png= (238 frames in our case).
 
-** [2] 회전 구조 분석 → 정지/중복 꼬리 trim
-회전이 끝에서 멈춘 *정지 프레임*을 잘라내고 유효한 1회전 범위만 남긴다.
-- 실행:
-  #+begin_src bash
-  python src/analyze_turntable.py frames_raw
-  #+end_src
-- 출력 예: =유효 1회전: frame 0..213 (214..237 제거)= + 확인용 몽타주 =_contact.png= 저장.
-  (본 사례 — 얼굴: 정지꼬리 없음 / 몸통: 끝 정지구간 제거)
-- ⚠️ *반드시 몽타주를 눈으로* 확인: 정면→후면→정면 순의 균일 회전인지(어긋나면 품질 저하).
-  (스크립트가 찍는 "최저상관 위치"는 후면 자기유사로 부정확할 수 있어 *참고용* — 판단은 몽타주로.)
-- 이후 단계는 출력된 유효 범위(예 =0..212=)의 프레임만 사용한다.
-- 원리(상관계수 = 이미지의 피어슨, ZNCC) · 구현 디테일 →부록 A.
-- *산출물:* 유효 프레임 범위(다음 단계가 사용) + =_contact.png= (확인용 몽타주).
+** [2] Analyze rotation, trim the still tail
+#+begin_src bash
+python src/analyze_turntable.py frames_raw
+#+end_src
+- Detects frames where the turntable stopped (adjacent-frame correlation ≈ 1.0) and reports the valid
+  single-revolution range; also saves a montage for a quick visual check.
+- *Output:* valid frame range + =_contact.png= montage. *Always eyeball it* (front→back→front, uniform).
 
-** [3] 전경 마스크 → RGBA
-배경을 지우고 인물만 알파(투명도)로 남긴다.
-- 실행:
-  #+begin_src bash
-  python src/make_masks.py frames_raw rgba --bg auto --frames 0:214
-  #+end_src
-- =--bg=: =black=(검정 배경=휘도 임계) / =gray=(단색 배경=배경색과의 거리) / =auto=(모서리색으로 자동 판별, 기본).
-- =--th=: 임계값(검정 기본 15, 회색 기본 35). =--frames a:b= 로 Step 2의 유효 범위만 처리.
-- 자동 후처리: 임계 마스크 → 구멍 메우기 → *최대 연결성분만 유지* → RGBA(=rgba/*.png=) 저장.
-- ⚠️ 마스크 품질을 몇 장 눈으로 확인(머리카락 경계/구멍 누락).
-- 구현 디테일 →부록 A(필요시).
-- *산출물:* =rgba/*.png= (RGBA 마스크 이미지; [5] 학습 입력).
+** [3] Foreground masks → RGBA
+#+begin_src bash
+python src/make_masks.py frames_raw rgba --bg auto --frames 0:214
+#+end_src
+- =--bg auto= picks black (luminance) or solid (color-distance) from the corners; cleanup keeps the
+  largest connected component and fills holes.
+- *Output:* =rgba/*.png= (masked images; training input).
 
-** [4] 해석적 턴테이블 카메라 포즈  ★가장 중요★
-- 턴테이블 = 원형 궤도. 각 프레임에 원 위 *균등 각도* 카메라를 부여(추정 안 함).
-- *왜 COLMAP 이 아니라 해석적 포즈인가:* COLMAP(SfM)은 프레임마다 카메라 위치를 *추정*하지만,
-  배경제거 + 단조 표면 + 턴테이블에선 매칭 특징이 부족해 실패한다(우리도 18/238만 등록, 포즈 왜곡).
-  반면 턴테이블은 기하가 이미 원형으로 알려져 있어, *추정 없이 부여*하는 게 더 정확하고 견고하다.
-- 코드: =src/poses_turntable.py :: turntable_transforms=.
-- *설정(최종 확정값):*
-
-| 파라미터        | 값      | 의미                                          |
-|-----------------+---------+-----------------------------------------------|
-| =direction=     | *-1*    | ★회전 방향. Peter 캡처는 -1 (반대면 형상 붕괴) |
-| =elevation_deg= | 0       | 눈높이 (단일 고도)                            |
-| =radius=        | 3.0     | 카메라 거리 (스케일에만 영향)                  |
-| =fov_x_deg=     | 40      | 수평 화각 (스케일에만 영향)                    |
-| =test_every=    | 8       | 8프레임마다 1장 held-out(검증용)               |
-
+** [4] Analytic turntable camera poses  ★critical★
 #+begin_src bash
 python src/poses_turntable.py data/peter_face/rgba data/peter_face --direction -1
 #+end_src
-- 나머지(=--elevation 0 --radius 3 --fov 40 --test-every 8=)는 기본값 = 위 표와 동일.
-- *산출물:* =transforms_train.json= / =transforms_test.json= (프레임별 카메라 포즈 c2w 4×4 + 화각; [5]가 읽는 핵심 입력).
-- ★ =direction= 이 틀리면: 정면만 선명하고 나머지가 다 뭉개지며 표면이 안으로 파임(concave).
-  확신 없으면 +1/-1 둘 다 학습 후 *test PSNR 높은 쪽* 채택(차이 ~3dB로 뚜렷).
+#+ATTR_LATEX: :environment tabularx :width \linewidth :align llX :booktabs t
+| Param         | Value | Meaning                                    |
+|---------------+-------+--------------------------------------------|
+| =direction=   | *-1*  | ★rotation sign; -1 for the Peter captures  |
+| =elevation=   | 0     | eye-level (single elevation)               |
+| =radius=      | 3.0   | camera distance (affects scale only)       |
+| =fov=         | 40    | horizontal FOV (affects scale only)        |
+| =test-every=  | 8     | every 8th frame held out for validation    |
+- *Output:* =transforms_train.json= / =transforms_test.json= (per-frame camera pose + FOV; read by [5]).
+- A wrong =direction= keeps only the front sharp and smears/concaves the rest (see Lessons).
 
-** [5] 3DGS 학습 (free, prior 없음)
-- stock r3dg =train.py= 그대로. 랜덤 init, 추가 prior 없음(=가장 깨끗하게 수렴=).
-- 실행은 반드시 env 인터프리터로(=/usr/bin/python= 금지).
+** [5] 3DGS training (free, no prior)
 #+begin_src bash
-cd third_party/Relightable3DGaussian
-/workspace/envs/r3dg/bin/python -u train.py --eval \
-  -s data/peter_face -m outputs/peter_face/stage1 \
+python -u train.py --eval -s data/peter_face -m outputs/peter_face/stage1 \
   --lambda_normal_render_depth 0.01 --lambda_normal_smooth 0.01 \
   --lambda_mask_entropy 0.1 --lambda_depth_var 1e-2 \
   --save_interval 30000 --checkpoint_interval 30000 --test_interval 7000
 #+end_src
+- Stock r3dg =train.py=, random init, no added prior. 30k iterations.
+- *Output:* =point_cloud/iteration_30000/point_cloud.ply= + =chkpnt30000.pth= (for relight).
 
-| 설정                    |     값 | 의미                           |
-|-------------------------+--------+--------------------------------|
-| iterations(기본)        |  30000 | 표준 3DGS 수렴                  |
-| =--lambda_mask_entropy= |    0.1 | 알파(전경) 일관성                |
-| =--lambda_normal_*=     |   0.01 | 노멀 정규화(완만)                |
-| =--lambda_depth_var=    |   1e-2 | 깊이 분산 정규화                 |
-| init                    | random | (hull/SMPL 등 강한 prior는 폐기) |
-
-- *산출물:* =point_cloud/iteration_30000/point_cloud.ply= (표준 3DGS) + =chkpnt30000.pth= (relight 체이닝용).
-- ⚠️ 결과는 *세로로 길쭉* 함 — 단일 고도의 깊이 모호성 때문(버그 아님). [6]에서 보정.
-
-** [6] 사후 Z-rescale (인체 비율 보정)
-- 가로(수평)는 정확하고 *세로(Z)만 과하게 늘어남*. 실루엣 실측으로 Z만 눌러줌.
-- 보정계수 ZF 구하기: 정면 마스크 height/width, 측면 height/depth 측정 →
-  =ZF = (실측 h/w) × (recon 수평 extent) / (recon Z extent)=.
-- 코드: =src/zrescale_ply.py= (위치 z + 각 가우시안 공분산을 함께 축소·재분해 = proper).
+** [6] Post-hoc Z-rescale (proportion fix)
 #+begin_src bash
-/workspace/envs/r3dg/bin/python src/zrescale_ply.py \
-  outputs/peter_face/stage1/point_cloud/iteration_30000/point_cloud.ply \
-  outputs/peter_face/face_zcorr.ply  0.22       # 얼굴 ZF=0.22 (몸통은 0.271)
+python src/zrescale_ply.py <in.ply> outputs/peter_face/face_zcorr.ply 0.22
 #+end_src
-- ⚠️ "위치만 줄이고 가우시안 크기는 유지"하는 cosmetic 변형은 *전체가 번져* 못 씀 → proper 사용.
-- *산출물:* =*_zcorr.ply= (인체 비율 보정된 최종 3DGS 에셋).
+- The horizontal axes are correct; only Z is over-stretched. Measure true height:width from the silhouette,
+  then squeeze Z by that factor (positions *and* each gaussian's covariance, re-decomposed).
+- *Output:* =*_zcorr.ply= (final, proportion-correct 3DGS asset).
 
-** [7] 결과 확인 / 렌더
-- SuperSplat 으로 =*_zcorr.ply= 열어 확인.
-- 데모 영상: =src/render_turntable.py= (r3dg CUDA 래스터라이저로 턴테이블 렌더 → ffmpeg).
+** [7] Inspect / render
 #+begin_src bash
-/workspace/envs/r3dg/bin/python src/render_turntable.py \
-  outputs/peter_face/face_zcorr.ply  out_frames  300 0 800   # 300프레임, elev0, 800px
+python src/render_turntable.py outputs/peter_face/face_zcorr.ply out_frames 300 0 800
 ffmpeg -framerate 30 -i out_frames/f_%04d.png -c:v libx264 -pix_fmt yuv420p face.mp4
 #+end_src
-- *산출물:* 데모 턴테이블 영상 =*.mp4= (공유·발표용).
+- Open =*_zcorr.ply= in SuperSplat; render a turntable video for sharing.
+- *Output:* demo =*.mp4=.
 
-* 5. 핵심 파라미터 한눈에 (Config summary)
+* Configuration summary
+#+ATTR_LATEX: :environment tabularx :width \linewidth :align lX :booktabs t
+| Step    | Key configuration                                                |
+|---------+------------------------------------------------------------------|
+| extract | ffmpeg, all frames                                               |
+| trim    | adjacent-frame corr > 0.9999 = still                             |
+| masks   | =--bg auto= (black>15 / solid>35) + fill + largest component     |
+| poses   | *direction=-1*, elev=0, radius=3, fov=40, test-every=8           |
+| train   | stock r3dg, 30k, random init, mask_entropy 0.1, depth_var 1e-2   |
+| rescale | Z-rescale factor from silhouette (head ZF≈0.22), covariance-aware |
+| render  | 300 frames / elev 0 / 800px → libx264 yuv420p                   |
 
-| 단계  | 핵심 설정                                                       |
-|-------+----------------------------------------------------------------|
-| 추출  | ffmpeg =-nostdin=, 전체 238프레임                                |
-| trim  | 인접상관 >0.9999 = 정지 → 제거                                    |
-| 마스크 | 검정=휘도>15 / 회색=거리>35, +fill+최대성분                        |
-| 포즈  | *direction=-1*, elev=0, radius=3, fov=40, test_every=8         |
-| 학습  | stock r3dg, 30k, random init, mask_entropy 0.1, depth_var 1e-2 |
-| 보정  | Z-rescale ZF (얼굴 0.22 / 몸통 0.271), proper(공분산 포함)        |
-| 렌더  | render_turntable 300f/elev0/800px → libx264 yuv420p            |
+* Lessons learned
+- *Rotation direction is the single most important setting.* A reversed turntable direction keeps only the
+  front sharp while everything else blurs and the surface caves inward; fixing it (no other change) makes
+  the reconstruction sharp. If unsure, train both signs and keep the higher test-PSNR / lower sliver ratio.
+- *Validate geometry, not PSNR.* A high PSNR can hide a badly distorted reconstruction; check silhouette
+  proportions and gaussian shapes directly.
+- *Don't fight the optimizer with strong priors.* Heavy geometric priors (hull containment, etc.) distorted
+  the shape. The robust path was to fix the data/poses, train plainly, and correct proportions afterward.
+- *Single-elevation capture cannot fix the vertical scale.* The result is vertically stretched by design;
+  we correct it post-hoc with a silhouette-matched Z-rescale.
+- *Face detail needs face pixels.* In a full-body frame the head is tiny, so face detail is poor — capture
+  the face close-up (or higher resolution) when detail matters.
 
-* 6. 핵심 교훈 / 주의점 (Lessons)
+* Limitations & better capture
+- Root limitation: a single-elevation turntable lacks vertical-scale information → requires the post-hoc fix.
+- Better input: *multi-elevation capture* (several heights / helical path) → correct proportions with no
+  post-processing; *uniform rotation* with no still frames; *1080p+* for detail. For a turntable the
+  background carries no parallax (camera is fixed), so removing it is fine.
 
-| 증상                       | 원인                          | 대응                               |
-|----------------------------+-------------------------------+------------------------------------|
-| 정면만 선명, 나머지 뭉개짐/오목 | *회전 방향(sign) 반대*          | direction=-1 (또는 양방향 PSNR 비교) |
-| 전체가 세로로 길쭉            | 단일 고도 = 깊이 스케일 모호      | 사후 Z-rescale (또는 멀티고도 촬영)    |
-| 형상이 기괴하게 깨짐          | *강한 prior가 optimizer와 충돌* | prior 빼고 포즈(데이터)부터 정확히     |
-| 얼굴에 구멍(전신일 때)        | 머리 픽셀 수 부족(저해상도)       | 고해상도/얼굴 클로즈업 별도 촬영        |
-- *검증은 PSNR 이 아니라 형상으로.* (PSNR 26 이 10:1로 깨진 모델을 못 걸러냄)
+* Artifacts
+** Code — per-step scripts
+#+ATTR_LATEX: :environment tabularx :width \linewidth :align lX :booktabs t
+| Step | Script                                                                    |
+|------+---------------------------------------------------------------------------|
+| [1]  | =ffmpeg= (external)                                                       |
+| [2]  | =src/analyze_turntable.py=                                                |
+| [3]  | =src/make_masks.py=                                                       |
+| [4]  | =src/poses_turntable.py=                                                  |
+| [5]  | =third_party/Relightable3DGaussian/train.py= (stock)                      |
+| [6]  | =src/zrescale_ply.py=                                                     |
+| [7]  | =src/render_turntable.py=                                                 |
+| env  | =scripts/runpod_launcher.py=                                              |
+| glb  | =src/ply_to_glb.py= (3DGS → GLB point cloud / mesh, compatibility export) |
 
-* 7. 한계 + 더 나은 입력 제안 (Limitations & better input)
-
-- 근본 한계: *단일 고도 턴테이블* → 수직 비율 정보 없음 → 사후 보정 필요.
-- 권장 입력:
-  - *멀티 고도 촬영*(여러 높이/나선/고개 끄덕임) → 보정 없이 올바른 비율.
-  - *균일 회전*(일정 속도), 정지 프레임 없음, 1회전 약간 초과(~380°).
-  - *고해상도(1080p+)* → 얼굴 디테일.
-  - 배경: 턴테이블은 카메라 고정이라 배경에 시차가 없어 포즈 복원에 무용 → 제거 무방.
-
-* 8. 산출물 / 코드 위치 (Artifacts)
-
-** 코드 — 단계별 실행 스크립트
-| 단계              | 스크립트                                                  |
-|-------------------+-----------------------------------------------------------|
-| [1] 프레임 추출    | =ffmpeg= (외부 도구)                                       |
-| [2] 회전분석·trim | =src/analyze_turntable.py=                        |
-| [3] 마스크        | =src/make_masks.py=                               |
-| [4] 포즈          | =src/poses_turntable.py= (CLI)                            |
-| [5] 3DGS 학습     | =third_party/Relightable3DGaussian/train.py= (stock, 무수정) |
-| [6] Z-rescale     | =src/zrescale_ply.py=                             |
-| [7] 렌더          | =src/render_turntable.py=                         |
-| 환경 재현         | =scripts/runpod_launcher.py= (부트스트랩이 전 스택 설치)     |
-| 문서              | =docs/head_mp4_to_3dgs_pipeline.org= (본 문서) · =docs/3dgs_lessons.org= (방법론·실패기록) |
-
-=> 그냥 궁금해서 그런데, 어떤 코드는 experiements 에 있고, 또 어떤 것은 src 에 있어요. 꼭 그렇게 할 이유가 있나요? 그렇지 않다면 src에 다 넣는게 좋지 않을까요? 만약 내 말에 동의한다면 그에 따라서 문서도 다 수정해야겠네요.
-
-** 산출물 — 데이터 / 에셋
-| 항목           | 경로                                                                       |
-|----------------+----------------------------------------------------------------------------|
-| 최종 얼굴 에셋  | =outputs/peter_face/face_30k_zcorr.ply= (+ =stage1_neg30k/chkpnt30000.pth=) |
-| 최종 몸통 에셋  | =outputs/peter_body_v2/body_v2_30k_zcorr.ply= (+ =stage1_free/chkpnt30000.pth=) |
-| 데모 영상      | =experiments/demo/turntables/*.mp4= (얼굴/몸통 × 원본/보정)                  |
-
-* 부록 A. 개념·용어 풀이 (한국어 전용 · 영문판 제외)
-:PROPERTIES:
-:NOTE: 영문 최종 번역 시 이 섹션 전체를 제외한다.
-:END:
-
-** CUDA 확장 4개란? (GPU 전용 가속 모듈)
-"CUDA 확장" = *GPU 전용으로 컴파일된 작은 프로그램*. 파이썬에서 불러 쓰지만 실제 계산은 GPU에서
-한다. 그래서 env 빌드가 오래 걸리고(컴파일), GPU 아키텍처(sm_80/86) 호환이 중요하다.
-
-| 모듈               | 한 줄 정체                   | 하는 일                                                     |
-|--------------------+-----------------------------+------------------------------------------------------------|
-| r3dg-rasterization | *3DGS의 심장* (렌더+학습)     | 수십만 가우시안을 카메라 시점 2D 이미지로 초고속 "칠하기"(래스터화). |
-|                    |                             | *미분 가능* → 학습 때 오차 신호를 거꾸로 흘려 가우시안을 고친다.     |
-| simple-knn         | 최근접 이웃(kNN)              | 학습 *초기화* 때 각 가우시안 첫 크기 결정(빽빽=작게/듬성=크게).     |
-| bvh                | 공간 색인 트리                | "이 광선이 어디 닿나/이 점 근처 뭐 있나"를 전수조사 없이 빠르게.     |
-|                    | (Bounding Volume Hierarchy) | r3dg의 *relight(빛·가시성)* 계산에 쓰임.                       |
-| nvdiffrast         | 미분가능 렌더링 라이브러리      | NVIDIA 제공(주로 메시). r3dg의 *재질/relight* 보조에 쓰임.      |
-
-- 우리가 쓰는 *3DGS 학습*의 핵심 = =r3dg-rasterization + simple-knn=.
-- =bvh + nvdiffrast= 는 나중에 할 *relight* 단계에서 주로 쓰인다(지금 단계엔 필수 아님).
-- "래스터화(rasterize)" = 3D 표현을 2D 화면 픽셀로 바꾸는 것. "미분 가능(differentiable)" =
-  결과의 오차를 입력 쪽으로 되돌려 보내 자동으로 값을 조정(=학습)할 수 있다는 뜻.
-
-** stdin 과 =-nostdin= (ffmpeg)
-- 프로그램은 3개의 통로를 쓴다: *stdin(입력)* · stdout(출력) · stderr(에러). stdin 은 키보드나
-  다른 명령이 흘려주는 입력을 받는 통로.
-- ffmpeg 은 *기본적으로 stdin 을 읽는다*(실행 중 =q= 로 중단하는 기능 등 때문).
-- 문제: 우리는 pod 에 명령을 보낼 때 *여러 줄 스크립트를 한꺼번에 stdin 으로 흘리는* 방식(heredoc)을
-  쓴다. 그러면 ffmpeg 이 자기 명령 뒤에 와야 할 *스크립트 줄들까지 빨아들여* 실행을 깨뜨린다.
-  (실제로 몸통 프레임 추출 때 이 문제로 한 번 에러가 났다.)
-- =-nostdin= = "ffmpeg 아 stdin 은 건드리지 마" → 다음 줄들이 bash 로 온전히 전달된다.
-  단독 터미널에서 한 줄로 직접 칠 땐 없어도 되지만, *스크립트 자동화 땐 안전장치*.
-
-** ffmpeg 프레임 추출 명령 뜯어보기
-=ffmpeg -i turntable_face.mp4 frames_raw/f_%04d.png=
-
-| 부분                    | 뜻                                                          |
-|-------------------------+-------------------------------------------------------------|
-| =ffmpeg=                | 영상/오디오 변환 만능 도구                                    |
-| =-i turntable_face.mp4= | =-i= = input(입력). 읽어들일 영상 파일 지정                   |
-| =frames_raw/f_%04d.png= | 출력(플래그 없는 마지막 인자 = 출력). 각 프레임을 PNG 로 저장 |
-| =%04d=                  | 숫자를 4자리 0채움(0001,0002,…) → 파일이 순서대로 정렬됨       |
-
-- 문법 규칙: =ffmpeg [입력옵션] -i 입력 [출력옵션] 출력=. *플래그(=-i= 등) 붙은 건 옵션/입력,
-  맨 끝 플래그 없는 인자가 출력*.
-- 기본적으로 *영상의 모든 프레임을 원본 fps 로* 뽑는다 → 여기선 238장. 출력 형식은 확장자(=.png=)로 자동 결정.
-- (참고) 프레임을 솎으려면 =-vf "fps=5"= 같은 옵션 추가 — 우리 최종은 전체 프레임 사용.
-
-** 이미지 상관계수 = 피어슨의 이미지 버전 (ZNCC)
-- 특별한 새 기법이 아니라, *피어슨 상관계수를 이미지에 적용*한 것.
-- 방법: 이미지(흑백·축소)를 *픽셀을 일렬로 펼친 긴 벡터*로 본다(예 160×90 → 길이 14,400).
-  두 이미지의 상관 = 두 벡터의 피어슨 상관.
-  =r = (a-ā)·(b-b̄) / (‖a-ā‖·‖b-b̄‖)=
-  - *평균 빼기(center)* → 전체 밝기 차이에 둔감.
-  - *각자 크기(norm)로 나눈 내적* → 대비 차이에 둔감.
-- 영상처리 명칭: *ZNCC* (Zero-mean Normalized Cross-Correlation, 평균제거 정규화 교차상관).
-- 해석: 동일(정지) 프레임 → r≈1.0 / 살짝 회전 → 약간↓ / 정면 vs 후면 → 낮음.
-- 축소·흑백으로 먼저 줄이는 이유: 빠르고, 미세 노이즈에 둔감해 *큰 구조*만 비교.
-
-** 3DGS / INRIA 원본
-- *3D Gaussian Splatting(3DGS)* = 장면을 수십만 개의 작은 반투명 타원체(가우시안 "블롭")로
-  표현하는 기법. 각 블롭은 위치·크기·방향·색·투명도를 가지며, 카메라 시점으로 빠르게
-  합성(splatting)해 사진 같은 영상을 만든다. (= 우리가 만드는 3D 모델의 형태)
-- *INRIA 원본* = 3DGS 를 2023년 처음 발표한 INRIA(프랑스 국립 컴퓨터과학 연구소)의 *원조 코드*
-  (SIGGRAPH 2023). 대부분의 3DGS 도구가 이 CUDA 래스터라이저를 기반으로 한다. 라이선스가
-  연구용이라 파생 코드(r3dg)도 PoC 한정.
-
-** PBR 재질 · 환경광 · 분해 (relight 의 기반)
-- *PBR(Physically Based Rendering, 물리 기반 렌더링)* = 표면이 빛과 어떻게 상호작용하는지를
-  *물리적으로 의미 있는 몇 개 값*으로 기술하는 표준. 이 값을 알면 *어떤 조명에서도* 올바르게
-  다시 그릴 수 있다. 핵심 3개:
-  - *albedo(알베도/기본색)* = 조명을 걷어낸 표면 본연의 색(그림자·하이라이트 없는 "진짜 색").
-  - *roughness(거칠기)* = 매끈↔거침 → 반사가 날카로움(거울)↔흐릿함(무광).
-  - *normal(법선)* = 각 표면 점이 바라보는 방향 → 빛 튕기는 방향, 요철·굴곡 느낌.
-- *환경광(environment light)* = 주변에서 들어오는 빛(보통 360° HDRI 환경맵).
-  - *HDRI(High Dynamic Range Image)* = 실제 빛 세기를 소수(float)로 저장해 진짜 밝기 비율을
-    보존하는 이미지(보통 사진은 0–255라 태양·흰벽 모두 "255"로 잘림).
-  - *환경맵* = 쉽게 말해 *그 자리에서 찍은 360도 사진*(스마트폰 파노라마·구글 스트리트뷰 같은).
-    내가 한 곳에 서서 위·아래·앞·뒤·좌·우 모든 방향을 빙 둘러 한 장에 담은 것.
-    - 둥근 시야를 네모 사진에 펼치는 건 *세계지도*와 같은 방식: 가로 = 빙 도는 방향(0°~360°),
-      세로 = 올려다봄~내려다봄(천장~바닥).
-    - 각 픽셀 = "그 방향에서 오는 빛이 얼마나 밝고 무슨 색인지" → 곧 조명 정보.
-  - 합치면(HDRI 환경맵) = *주변 빛을 진짜 밝기로 담은 360도 사진*.
-  - *물체를 둘러싼 광원 역할:* 이 360도 사진을 거대한 공처럼 물체 주위에 둘러치면(천체투영관 돔처럼),
-    각 방향이 자기 빛을 물체에 비춘다. 사진에서 밝았던 쪽(태양·창)=강한 하이라이트, 어두웠던 쪽=은은한
-    채움광 → 물체가 *진짜 그 장소에 있는 것처럼* 조명된다.
-  - 그래서 *relight = HDRI 를 다른 것으로 바꿔 끼우는 것*(노을/스튜디오/촛불 등). 파일은 =.hdr= / =.exr=.
-- *분해(decompose)* = 입력 사진엔 "진짜 색 + 그때 조명"이 섞여 있다. 이를 ①재질(albedo/roughness/
-  normal) ②환경광 으로 갈라내는 것. → 환경광만 바꿔 끼우면 새 조명 아래 그려짐 = *relight*.
-- 비유: 보통 사진은 조명이 "구워져" 못 바꾼다. PBR 분해 = 사진을 "물체의 진짜 페인트색 + 켜져
-  있던 조명"으로 나눠, 조명을 끄고 새로 켤 수 있게 하는 것.
-- 즉 r3dg 는 3DGS 를 만들며 *동시에* 각 가우시안의 재질 + 장면 환경광을 따로 알아낸다 → relight 가능.
-
-** 해상도 표기 (720p / 1080p / 4K) 와 "p"
-- 숫자 = *세로 픽셀 수(높이)*. "p" = progressive scan(프로그레시브, 모든 줄을 한 번에 그림 ↔ 옛
-  "i"=interlaced). 지금은 거의 progressive라 그냥 *해상도 등급 라벨*처럼 쓴다. 읽기: "피"(알파벳 P).
-
-| 라벨        | 픽셀(가로×세로) | 별칭          |
-|-------------+-----------------+---------------|
-| 720p        | 1280×720        | HD (우리 입력) |
-| 1080p       | 1920×1080       | Full HD       |
-| 1440p       | 2560×1440       | QHD / 2K      |
-| 2160p       | 3840×2160       | 4K UHD        |
-
-- =1080p+= = "1080p 이상"(+ = 이상). 픽셀이 많을수록 피사체에 박히는 정보↑ → 디테일↑
-  (특히 전신 샷에서 작게 잡히는 *얼굴 디테일* 개선).
+** Artifacts — data / assets
+#+ATTR_LATEX: :environment tabularx :width \linewidth :align lX :booktabs t
+| Item            | Path                                                               |
+|-----------------+--------------------------------------------------------------------|
+| Final head .ply | =outputs/peter_face/face_30k_zcorr.ply= (+ =chkpnt30000.pth=)       |
+| Demo videos     | =experiments/demo/turntables/*.mp4=                                 |
+| GLB exports     | =experiments/demo/glb/peter_head_{points,mesh}.glb= (lossy)         |
